@@ -808,7 +808,6 @@ def load_model(model_name, local_dir="./models", wrapper_cls = HuggingFaceEmbedd
         })
         encode_kwargs.update({
             'batch_size': 32,  # Увеличиваем batch_size для GPU
-            'show_progress_bar': True,
         })
         print(f"🔥 Загружаем {model_name} на GPU")
     else:
