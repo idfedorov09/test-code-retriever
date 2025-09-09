@@ -112,12 +112,21 @@ class ClassSig:
     name: str
     bases: List[str]
     methods: List[FunctionSig] = field(default_factory=list)
+    inherited_by: List[str] = field(default_factory=list)  # Classes that inherit from this class
     lineno: int = 0
     end_lineno: int = 0
 
     def to_block(self) -> str:
         bases = f"({', '.join(self.bases)})" if self.bases else ""
         header = f"class {self.name}{bases}  # L{self.lineno}-{self.end_lineno}"
+        
+        # Add inheritance info
+        if self.inherited_by:
+            inheritance_info = f" inherited_by: {', '.join(self.inherited_by[:3])}"
+            if len(self.inherited_by) > 3:
+                inheritance_info += f" (+{len(self.inherited_by)-3} more)"
+            header += inheritance_info
+        
         body = "\n".join(["  - " + m.to_line() for m in self.methods])
         return f"{header}\n{body}" if body else header
 
@@ -352,6 +361,32 @@ def build_call_graph(file_maps: List[FileMap]) -> None:
                             candidate.called_by.append(caller_name)
 
 
+def build_inheritance_graph(file_maps: List[FileMap]) -> None:
+    """Build inheritance graph: populate inherited_by fields for all classes."""
+    # Create a mapping from class name to class objects
+    all_classes: Dict[str, List[ClassSig]] = {}
+    
+    # Collect all classes
+    for file_map in file_maps:
+        for cls in file_map.classes:
+            if cls.name not in all_classes:
+                all_classes[cls.name] = []
+            all_classes[cls.name].append(cls)
+    
+    # Build inheritance relationships
+    for file_map in file_maps:
+        for cls in file_map.classes:
+            for base_name in cls.bases:
+                # Clean base class name (remove generics, etc.)
+                clean_base = base_name.split('[')[0].split('.').pop()  # Take last part after dots
+                
+                # Find base class and add this class as its inheritor
+                if clean_base in all_classes:
+                    for base_cls in all_classes[clean_base]:
+                        if cls.name not in base_cls.inherited_by:
+                            base_cls.inherited_by.append(cls.name)
+
+
 # -----------------------------------------------------------------------------
 # Index construction: documents + (optional) graphs/metrics
 # -----------------------------------------------------------------------------
@@ -385,6 +420,9 @@ def build_repo_index(
 
     # Build call graph to populate called_by relationships
     build_call_graph(file_maps)
+    
+    # Build inheritance graph to populate inherited_by relationships
+    build_inheritance_graph(file_maps)
 
     # Create LangChain Documents from maps
     docs: List[Document] = []
@@ -409,6 +447,21 @@ def build_repo_index(
         docs.append(Document(
             page_content="\n".join(call_graph_lines), 
             metadata={"source": "__call_graph__", "type": "call-graph-summary"}
+        ))
+
+    # Add inheritance graph summary document for better class usage queries
+    inheritance_lines = ["CLASS INHERITANCE RELATIONSHIPS:"]
+    for file_map in file_maps:
+        for cls in file_map.classes:
+            if cls.inherited_by:
+                inheritance_lines.append(f"  {cls.name} ({file_map.path}:{cls.lineno}) inherited by: {', '.join(cls.inherited_by)}")
+            if cls.bases:
+                inheritance_lines.append(f"  {cls.name} ({file_map.path}:{cls.lineno}) inherits from: {', '.join(cls.bases)}")
+    
+    if len(inheritance_lines) > 1:  # More than just the header
+        docs.append(Document(
+            page_content="\n".join(inheritance_lines), 
+            metadata={"source": "__inheritance_graph__", "type": "inheritance-graph-summary"}
         ))
 
     # Optional: add a coarse import-graph summary to help with cross-file questions
@@ -489,11 +542,12 @@ def build_repo_index(
 
 EVIDENCE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """
-You are an architectural code reviewer analyzing Python code. You will see a compact map of a repository with function signatures, imports, classes, and call relationships.
+You are an architectural code reviewer analyzing Python code. You will see a compact map of a repository with function signatures, imports, classes, call relationships, and inheritance relationships.
 
 The map shows:
 - Function signatures with their calls and called_by relationships
 - Class methods and their call patterns
+- Class inheritance with inherited_by relationships (subclasses)
 - Import dependencies
 
 Given the user question, propose up to {max_items} precise evidence items (code bodies to inspect) in JSON.
@@ -504,7 +558,9 @@ IMPORTANT:
 - Copy the exact path shown after `FILE:` in the context
 - For questions about "what calls X" or "where is X used", look at the `called_by` field
 - For questions about "what does X call" or "dependencies of X", look at the `calls` field
-- Include both the target function and its callers/callees for complete analysis
+- For questions about "how is class X used" or "what uses class X", look at the `inherited_by` field (subclasses)
+- For questions about class inheritance, check both `bases` (parent classes) and `inherited_by` (child classes)
+- Include both the target class/function and its relationships for complete analysis
 
 Respond ONLY with JSON array, no prose.
 """),
@@ -517,15 +573,20 @@ You are a senior software architect analyzing Python code for code review. Using
 
 The repository map includes:
 - Function signatures with call relationships (calls/called_by fields)
-- Class hierarchies and method relationships  
+- Class hierarchies with inheritance relationships (bases/inherited_by fields)
+- Method relationships and class usage patterns
 - Import dependencies and module structure
 
 For questions about function usage:
 - Use "called_by" information to identify where functions are used
 - Use "calls" information to understand what a function depends on
-- Provide specific file:line references from the evidence
-- Explain the call chain and relationships
 
+For questions about class usage:
+- Use "inherited_by" information to identify subclasses (how class is used through inheritance)
+- Use "bases" information to understand parent classes
+- Consider inheritance as a form of class usage - subclasses are users of the parent class
+
+Provide specific file:line references from the evidence and explain relationships clearly.
 Be precise, cite concrete references as `file:line`, and provide actionable insights. 
 If analyzing risks or issues, include specific remediation steps.
 Reply in {answer_language}.
@@ -543,10 +604,10 @@ def _trim_to_chars(text: str, limit: int) -> str:
 
 
 def _gather_map_snippets(docs: List[Document], max_chars: int = 20000) -> str:
-    # Prioritize call graph, file maps and graph summary
+    # Prioritize inheritance graph, call graph, file maps and graph summary
     pieces = []
     for d in docs:
-        if d.metadata.get("type") in ("call-graph-summary", "py-map", "graph-summary"):
+        if d.metadata.get("type") in ("inheritance-graph-summary", "call-graph-summary", "py-map", "graph-summary"):
             pieces.append(f"---\n{d.page_content}\n")
         if sum(len(p) for p in pieces) > max_chars:
             break
@@ -872,7 +933,8 @@ tool_bge_code = make_arch_review_tool(
 # print("\n" + "="*50 + "\n")
 
 # # Дополнительный тест для понимания архитектуры
-result2 = tool_bge_code.invoke("Какие АПИ эндпоинты есть в проекте?")
+print('123')
+result2 = tool_bge_code.invoke("Какие есть вызовы класса PrefixedDBModel? Как он используется?")
 print("=== Результат поиска API эндпоинтов ===")
 print(result2)
 
