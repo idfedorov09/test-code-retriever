@@ -904,18 +904,18 @@ def load_model(model_name, local_dir="./models", wrapper_cls = HuggingFaceEmbedd
 
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 
-# emb_llm_encoder = load_model(
-#     model_name="BAAI/llm-embedder",
-#     wrapper_cls=HuggingFaceBgeEmbeddings
-# )
+emb_llm_encoder = load_model(
+    model_name="BAAI/llm-embedder",
+    wrapper_cls=HuggingFaceBgeEmbeddings
+)
 
 # emb_bge_code создается автоматически в make_arch_review_tool
 
-# tool_llm_encoder = make_arch_review_tool(
-#     project_path=os.getenv('TEST_PROJ_PATH'),
-#     llm=llm,
-#     embeddings=emb_llm_encoder
-# )
+tool_llm_encoder = make_arch_review_tool(
+    project_path=os.getenv('TEST_PROJ_PATH'),
+    llm=llm,
+    embeddings=emb_llm_encoder
+)
 
 # Создаем инструмент с автоматическим определением GPU/CPU
 print("🔧 Создаем RAG инструмент...")
@@ -934,7 +934,13 @@ tool_bge_code = make_arch_review_tool(
 
 # # Дополнительный тест для понимания архитектуры
 print('123')
-result2 = tool_bge_code.invoke("Какие есть вызовы класса PrefixedDBModel? Как он используется?")
+result2 = tool_bge_code.invoke("Как используется класс PrefixedDBModel в проекте?")
 print("=== Результат поиска API эндпоинтов ===")
 print(result2)
+print("\n\n")
 
+
+print('123')
+result2 = tool_bge_code.invoke("Как используется класс PrefixedDBModel в проекте?")
+print("=== Результат поиска API эндпоинтов ===")
+print(result2)
