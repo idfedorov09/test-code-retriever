@@ -19,3 +19,6 @@ grpcio-tools~=1.74.0
 yandexcloud~=0.280.0
 
 dotenv~=0.9.9
+
+# Web interface
+flask~=3.0.0

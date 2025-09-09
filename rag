@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# RAG CLI wrapper script
+# Упрощает использование RAG системы
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI_SCRIPT="$SCRIPT_DIR/cli.py"
+
+# Проверяем наличие Python
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Python3 не найден. Установите Python 3.7+"
+    exit 1
+fi
+
+# Проверяем наличие CLI скрипта
+if [[ ! -f "$CLI_SCRIPT" ]]; then
+    echo "❌ CLI скрипт не найден: $CLI_SCRIPT"
+    exit 1
+fi
+
+# Показываем справку если нет аргументов
+if [[ $# -eq 0 ]]; then
+    echo "🤖 RAG система для анализа Python кода"
+    echo ""
+    echo "Использование:"
+    echo "  rag \"вопрос\" [опции]"
+    echo ""
+    echo "Примеры:"
+    echo "  rag \"Как используется класс PrefixedDBModel?\""
+    echo "  rag \"Какие функции вызывают метод render?\" --tool=tool_bge_code"
+    echo "  rag \"Покажи архитектуру проекта\" --verbose"
+    echo ""
+    echo "Опции:"
+    echo "  --tool=TOOL          Выбор инструмента (tool_llm_encoder, tool_bge_code, auto)"
+    echo "  --verbose, -v        Подробный вывод"
+    echo "  --help, -h           Показать справку"
+    echo ""
+    exit 0
+fi
+
+# Передаем все аргументы в Python скрипт
+exec python3 "$CLI_SCRIPT" "$@"

@@ -933,14 +933,14 @@ tool_bge_code = make_arch_review_tool(
 # print("\n" + "="*50 + "\n")
 
 # # Дополнительный тест для понимания архитектуры
-print('123')
-result2 = tool_bge_code.invoke("Как используется класс PrefixedDBModel в проекте?")
-print("=== Результат поиска API эндпоинтов ===")
-print(result2)
-print("\n\n")
+# print('123')
+# result2 = tool_bge_code.invoke("Как используется класс PrefixedDBModel в проекте?")
+# print("=== Результат поиска API эндпоинтов ===")
+# print(result2)
+# print("\n\n")
 
 
-print('123')
-result2 = tool_bge_code.invoke("Как используется класс PrefixedDBModel в проекте?")
-print("=== Результат поиска API эндпоинтов ===")
-print(result2)
+# print('123')
+# result2 = tool_llm_encoder.invoke("Как используется класс PrefixedDBModel в проекте?")
+# print("=== Результат поиска API эндпоинтов ===")
+# print(result2)
