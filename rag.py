@@ -18,6 +18,20 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 
+# GPU detection and configuration
+try:
+    import torch
+    GPU_AVAILABLE = torch.cuda.is_available()
+    DEVICE = "cuda" if GPU_AVAILABLE else "cpu"
+    print(f"🚀 Device: {DEVICE}")
+    if GPU_AVAILABLE:
+        print(f"📱 GPU: {torch.cuda.get_device_name(0)}")
+        print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+except ImportError:
+    GPU_AVAILABLE = False
+    DEVICE = "cpu"
+    print("⚠️  PyTorch не найден, используем CPU")
+
 # LangChain core & community
 from langchain_core.tools import StructuredTool
 from langchain_core.documents import Document
@@ -422,7 +436,37 @@ def build_repo_index(
     bm25 = BM25Retriever.from_documents(docs)
     bm25.k = bm25_k
 
+    # Создаем FAISS индекс с GPU поддержкой если доступно
     faiss = FAISS.from_documents(docs, embeddings, distance_strategy=DistanceStrategy.COSINE)
+    
+    # Переносим FAISS индекс на GPU если доступно
+    if GPU_AVAILABLE:
+        try:
+            import faiss as faiss_lib
+            if hasattr(faiss_lib, 'StandardGpuResources'):
+                print("🚀 Переносим FAISS индекс на GPU...")
+                # Получаем размерность векторов
+                dimension = len(embeddings.embed_query("test"))
+                
+                # Создаем GPU ресурсы
+                res = faiss_lib.StandardGpuResources()
+                
+                # Конфигурируем GPU индекс
+                gpu_config = faiss_lib.GpuIndexFlatConfig()
+                gpu_config.device = 0  # Используем первую GPU
+                
+                # Переносим на GPU (если индекс поддерживает)
+                try:
+                    cpu_index = faiss.index
+                    gpu_index = faiss_lib.index_cpu_to_gpu(res, 0, cpu_index)
+                    faiss.index = gpu_index
+                    print("✅ FAISS индекс успешно перенесен на GPU")
+                except Exception as gpu_error:
+                    print(f"⚠️  Не удалось перенести FAISS на GPU: {gpu_error}")
+                    print("📝 Используем CPU версию FAISS")
+        except ImportError:
+            print("⚠️  faiss-gpu не найден, используем CPU версию")
+    
     dense_retriever = faiss.as_retriever(search_kwargs={"k": dense_k})
 
     # Hybrid ensemble
@@ -646,9 +690,8 @@ def make_arch_review_tool(
         evidence_char_budget: int = 20000,
         max_evidence_items: int = 8,
         answer_language: str = 'ru',
-        embeddings: Embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-small-en-v1.5",
-        )
+        embeddings: Embeddings = None,
+        use_gpu: bool = None
 ) -> StructuredTool:
     """Create a LangChain tool that performs architecture-focused Q&A over a Python repo.
 
@@ -661,11 +704,20 @@ def make_arch_review_tool(
         evidence_char_budget: max chars of fetched bodies
         max_evidence_items: planner budget for how many code bodies to fetch
         answer_language: answer language
-        embeddings:  embeddings model
+        embeddings: embeddings model (если None, создается автоматически)
+        use_gpu: принудительно использовать GPU (None = автоопределение)
 
     Returns:
         StructuredTool ready to plug into an agent. Input schema: {"question": str}
     """
+    
+    # Создаем эмбеддинги по умолчанию если не переданы
+    if embeddings is None:
+        if use_gpu is None:
+            use_gpu = GPU_AVAILABLE
+        
+        model_name = "BAAI/bge-code-v1" if use_gpu else "BAAI/bge-small-en-v1.5"
+        embeddings = load_model(model_name, use_gpu=use_gpu)
     index = build_repo_index(
         project_path=project_path,
         bm25_k=bm25_k,
@@ -730,18 +782,64 @@ llm = YandexGPT(
     folder_id=os.getenv('YANDEX_GPT_FOLDER_ID'),
     model_name="yandexgpt")
 
-def load_model(model_name, local_dir="./models", wrapper_cls = HuggingFaceEmbeddings):
+def load_model(model_name, local_dir="./models", wrapper_cls = HuggingFaceEmbeddings, use_gpu=None):
+    """
+    Загружает модель эмбеддингов с поддержкой GPU.
+    
+    Args:
+        model_name: Имя модели
+        local_dir: Локальная директория для кеширования
+        wrapper_cls: Класс обертки для модели
+        use_gpu: Принудительно использовать GPU (None = автоопределение)
+    """
+    if use_gpu is None:
+        use_gpu = GPU_AVAILABLE
+    
     local_path = Path(local_dir) / model_name.replace("/", "_")
-    if local_path.exists():
-        return wrapper_cls(model_name=str(local_path))
+    
+    # Конфигурация для GPU
+    model_kwargs = {}
+    encode_kwargs = {}
+    
+    if use_gpu and GPU_AVAILABLE:
+        model_kwargs.update({
+            'device': DEVICE,
+            'trust_remote_code': True,
+        })
+        encode_kwargs.update({
+            'batch_size': 32,  # Увеличиваем batch_size для GPU
+            'show_progress_bar': True,
+        })
+        print(f"🔥 Загружаем {model_name} на GPU")
     else:
-        emb = wrapper_cls(model_name=model_name)
+        model_kwargs.update({
+            'device': 'cpu',
+        })
+        encode_kwargs.update({
+            'batch_size': 8,  # Меньший batch_size для CPU
+        })
+        print(f"🐌 Загружаем {model_name} на CPU")
+    
+    if local_path.exists():
+        return wrapper_cls(
+            model_name=str(local_path),
+            model_kwargs=model_kwargs,
+            encode_kwargs=encode_kwargs
+        )
+    else:
+        emb = wrapper_cls(
+            model_name=model_name,
+            model_kwargs=model_kwargs,
+            encode_kwargs=encode_kwargs
+        )
         try:
-            emb.client.save(str(local_path))
-        except AttributeError:
-            emb._client.save(str(local_path))
-        finally:
-            pass
+            # Сохраняем модель локально
+            if hasattr(emb, 'client'):
+                emb.client.save(str(local_path))
+            elif hasattr(emb, '_client'):
+                emb._client.save(str(local_path))
+        except Exception as e:
+            print(f"⚠️  Не удалось сохранить модель локально: {e}")
         return emb
 
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
@@ -751,9 +849,7 @@ from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 #     wrapper_cls=HuggingFaceBgeEmbeddings
 # )
 
-emb_bge_code = load_model(
-    model_name="BAAI/bge-code-v1",
-)
+# emb_bge_code создается автоматически в make_arch_review_tool
 
 # tool_llm_encoder = make_arch_review_tool(
 #     project_path=os.getenv('TEST_PROJ_PATH'),
@@ -761,10 +857,12 @@ emb_bge_code = load_model(
 #     embeddings=emb_llm_encoder
 # )
 
+# Создаем инструмент с автоматическим определением GPU/CPU
+print("🔧 Создаем RAG инструмент...")
 tool_bge_code = make_arch_review_tool(
     project_path=os.getenv('TEST_PROJ_PATH'),
     llm=llm,
-    embeddings=emb_bge_code
+    use_gpu=True  # Принудительно используем GPU если доступно
 )
 
 # # Тестируем улучшенную систему на примере поиска вызовов функций
