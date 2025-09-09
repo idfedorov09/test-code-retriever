@@ -1,0 +1,5 @@
+.env
+.idea/
+models/
+.DS_Store
+.venv

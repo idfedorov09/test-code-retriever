@@ -1,0 +1,38 @@
+volumes:
+  pg_data:
+  static:
+  media:
+
+services:
+  db:
+    image: postgres:13
+    env_file: .env
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+  backend:
+    image: crashkkm/foodgram_backend
+    env_file: .env
+    volumes:
+      - static:/backend_static/
+      - media:/media/
+    depends_on:
+      - db
+  frontend:
+    image: crashkkm/foodgram_frontend
+    env_file: .env
+    command: cp -r /app/build/. /static/
+    volumes:
+      - static:/static/
+  gateway:
+    image: crashkkm/foodgram_gateway
+    env_file: .env
+    ports:
+      - 8080:80
+    volumes:
+      - static:/static/
+      - media:/media/
+      - ../frontend/build:/usr/share/nginx/html/
+      - ../docs/:/usr/share/nginx/html/api/docs/
+    depends_on:
+      - backend
+      - frontend

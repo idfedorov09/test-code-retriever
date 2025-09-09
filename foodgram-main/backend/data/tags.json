@@ -1,0 +1,7 @@
+[
+    {"name": "Завтраки", "slug": "breakfast"},
+    {"name": "Ужины", "slug": "dinners"},
+    {"name": "Десерты", "slug": "desserts"},
+    {"name": "Салаты", "slug": "salads"},
+    {"name": "Супы", "slug": "soups"}
+]
