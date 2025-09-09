@@ -174,19 +174,21 @@ def parse_python_file(path: str, root: str) -> Optional[FileMap]:
 
         def visit_Import(self, node: ast.Import) -> None:  # type: ignore[override]
             for alias in node.names:
-                imports.append(alias.name)
+                if alias.name:
+                    imports.append(alias.name)
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # type: ignore[override]
             mod = node.module or ""
             for alias in node.names:
                 name = alias.name
-                imports.append(f"{mod}.{name}" if mod else name)
+                if name:
+                    imports.append(f"{mod}.{name}" if mod else name)
 
         def visit_Call(self, node: ast.Call) -> None:  # type: ignore[override]
             """Extract function calls within current function."""
             if self.current_function is not None:
                 call_name = self._extract_call_name(node.func)
-                if call_name:
+                if call_name and isinstance(call_name, str):
                     self.current_function.calls.append(call_name)
             self.generic_visit(node)
 
@@ -318,6 +320,9 @@ def build_call_graph(file_maps: List[FileMap]) -> None:
         # Process standalone functions
         for func in file_map.functions:
             for call_name in func.calls:
+                if not call_name:  # Skip empty or None call names
+                    continue
+                    
                 # Try to find the called function
                 candidates = []
                 
@@ -328,19 +333,23 @@ def build_call_graph(file_maps: List[FileMap]) -> None:
                 # Try partial matches for method calls
                 if '.' in call_name:
                     method_name = call_name.split('.')[-1]
-                    for func_name, funcs in all_functions.items():
-                        if func_name.endswith(f'.{method_name}'):
-                            candidates.extend(funcs)
+                    if method_name:  # Ensure method_name is not empty
+                        for func_name, funcs in all_functions.items():
+                            if func_name.endswith(f'.{method_name}'):
+                                candidates.extend(funcs)
                 
                 # Add caller to called_by lists
                 for candidate in candidates:
-                    if func.qname not in candidate.called_by:
+                    if func.qname and func.qname not in candidate.called_by:
                         candidate.called_by.append(func.qname)
         
         # Process class methods
         for cls in file_map.classes:
             for method in cls.methods:
                 for call_name in method.calls:
+                    if not call_name:  # Skip empty or None call names
+                        continue
+                        
                     candidates = []
                     
                     # Direct match
@@ -350,15 +359,17 @@ def build_call_graph(file_maps: List[FileMap]) -> None:
                     # Try partial matches
                     if '.' in call_name:
                         method_name = call_name.split('.')[-1]
-                        for func_name, funcs in all_functions.items():
-                            if func_name.endswith(f'.{method_name}'):
-                                candidates.extend(funcs)
+                        if method_name:  # Ensure method_name is not empty
+                            for func_name, funcs in all_functions.items():
+                                if func_name.endswith(f'.{method_name}'):
+                                    candidates.extend(funcs)
                     
                     # Add caller to called_by lists
-                    caller_name = f"{cls.name}.{method.qname.split('.')[-1]}"
-                    for candidate in candidates:
-                        if caller_name not in candidate.called_by:
-                            candidate.called_by.append(caller_name)
+                    if method.qname:
+                        caller_name = f"{cls.name}.{method.qname.split('.')[-1]}"
+                        for candidate in candidates:
+                            if caller_name not in candidate.called_by:
+                                candidate.called_by.append(caller_name)
 
 
 def build_inheritance_graph(file_maps: List[FileMap]) -> None:
@@ -377,13 +388,19 @@ def build_inheritance_graph(file_maps: List[FileMap]) -> None:
     for file_map in file_maps:
         for cls in file_map.classes:
             for base_name in cls.bases:
+                if not base_name:  # Skip empty or None base names
+                    continue
+                    
                 # Clean base class name (remove generics, etc.)
                 clean_base = base_name.split('[')[0].split('.').pop()  # Take last part after dots
+                
+                if not clean_base:  # Skip if clean_base is empty
+                    continue
                 
                 # Find base class and add this class as its inheritor
                 if clean_base in all_classes:
                     for base_cls in all_classes[clean_base]:
-                        if cls.name not in base_cls.inherited_by:
+                        if cls.name and cls.name not in base_cls.inherited_by:
                             base_cls.inherited_by.append(cls.name)
 
 
@@ -471,7 +488,7 @@ def build_repo_index(
             mod = m.path.replace(os.sep, ".").rstrip(".py")
             G.add_node(mod, loc=m.loc)
             for imp in m.imports:
-                if "/" in imp or "." in imp:
+                if imp and ("/" in imp or "." in imp):
                     # attempt to map to local module name (best-effort)
                     tgt = imp.replace("/", ".")
                     G.add_edge(mod, tgt)
