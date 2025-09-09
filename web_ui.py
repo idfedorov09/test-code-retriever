@@ -134,11 +134,20 @@ HTML_TEMPLATE = """
             </div>
             
             <div class="form-group">
-                <label for="tool">Инструмент анализа:</label>
-                <select id="tool" name="tool">
-                    <option value="auto">Автоматический выбор</option>
-                    <option value="tool_llm_encoder">LLM Embedder (лучше для классов)</option>
-                    <option value="tool_bge_code">BGE Code (лучше для функций)</option>
+                <label for="rag_type">Тип RAG системы:</label>
+                <select id="rag_type" name="rag_type">
+                    <option value="auto">🤖 Автоматический выбор</option>
+                    <option value="python">🐍 Python (AST анализ)</option>
+                    <option value="universal">🌐 Универсальный (все файлы)</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="use_gpu">Использование GPU:</label>
+                <select id="use_gpu" name="use_gpu">
+                    <option value="auto">⚡ Автоматически</option>
+                    <option value="true">🔥 Принудительно GPU</option>
+                    <option value="false">🐌 Только CPU</option>
                 </select>
             </div>
             
@@ -156,9 +165,17 @@ HTML_TEMPLATE = """
             <div class="example" onclick="setQuestion('Покажи архитектуру проекта')">
                 Покажи архитектуру проекта
             </div>
-            <div class="example" onclick="setQuestion('Где определен класс User?')">
-                Где определен класс User?
+            <div class="example" onclick="setQuestion('Какие есть Docker файлы?')">
+                Какие есть Docker файлы?
             </div>
+            <div class="example" onclick="setQuestion('Есть ли проблемы с безопасностью?')">
+                Есть ли проблемы с безопасностью?
+            </div>
+        </div>
+        
+        <div id="project-info" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; display: none;">
+            <h3>📊 Информация о проекте</h3>
+            <div id="project-details"></div>
         </div>
         
         <div id="result" class="result" style="display: none;"></div>
@@ -169,12 +186,50 @@ HTML_TEMPLATE = """
             document.getElementById('question').value = question;
         }
         
+        // Загружаем информацию о проекте при загрузке страницы
+        window.addEventListener('load', async function() {
+            try {
+                const response = await fetch('/project-info');
+                const projectInfo = await response.json();
+                
+                if (projectInfo && !projectInfo.error) {
+                    const projectInfoDiv = document.getElementById('project-info');
+                    const projectDetailsDiv = document.getElementById('project-details');
+                    
+                    let detailsHtml = `
+                        <p><strong>🎯 Основной тип:</strong> ${projectInfo.main_type.toUpperCase()}</p>
+                        <p><strong>🔧 Обнаруженные технологии:</strong> ${projectInfo.detected_types.join(', ')}</p>
+                    `;
+                    
+                    if (projectInfo.is_multi_tech) {
+                        detailsHtml += '<p><strong>📦 Мульти-технологичный проект</strong></p>';
+                    }
+                    
+                    if (projectInfo.file_stats) {
+                        const topExtensions = Object.entries(projectInfo.file_stats)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 5);
+                        
+                        detailsHtml += '<p><strong>📁 Топ файлов:</strong> ';
+                        detailsHtml += topExtensions.map(([ext, count]) => `${ext} (${count})`).join(', ');
+                        detailsHtml += '</p>';
+                    }
+                    
+                    projectDetailsDiv.innerHTML = detailsHtml;
+                    projectInfoDiv.style.display = 'block';
+                }
+            } catch (error) {
+                console.log('Не удалось загрузить информацию о проекте:', error);
+            }
+        });
+        
         document.getElementById('questionForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const formData = new FormData(e.target);
             const question = formData.get('question');
-            const tool = formData.get('tool');
+            const rag_type = formData.get('rag_type');
+            const use_gpu = formData.get('use_gpu');
             
             const resultDiv = document.getElementById('result');
             const submitButton = document.querySelector('button[type="submit"]');
@@ -191,14 +246,24 @@ HTML_TEMPLATE = """
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ question, tool })
+                    body: JSON.stringify({ question, rag_type, use_gpu })
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
                     resultDiv.className = 'result';
-                    resultDiv.textContent = data.result;
+                    let resultText = data.result;
+                    
+                    // Добавляем информацию о проекте если есть
+                    if (data.project_info) {
+                        const info = data.project_info;
+                        resultText = `🎯 Проект: ${info.main_type.toUpperCase()}` + 
+                                   (info.is_multi_tech ? ` (мульти-технологии: ${info.detected_types.join(', ')})` : '') + 
+                                   `\\n📊 Использована система: ${data.rag_system}\\n\\n` + resultText;
+                    }
+                    
+                    resultDiv.textContent = resultText;
                 } else {
                     resultDiv.className = 'result error';
                     resultDiv.textContent = '❌ Ошибка: ' + data.error;
@@ -215,32 +280,76 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# Глобальные переменные для инструментов
-tool_llm_encoder = None
-tool_bge_code = None
+# Глобальные переменные
+rag_tools = {}
+project_info = None
 
 def init_tools():
-    """Инициализация RAG инструментов."""
-    global tool_llm_encoder, tool_bge_code
+    """Инициализация RAG инструментов с новой архитектурой."""
+    global rag_tools, project_info
     
     try:
-        from rag import tool_llm_encoder as tle, tool_bge_code as tbc
-        tool_llm_encoder = tle
-        tool_bge_code = tbc
-        return True
+        import os
+        from rag_main import create_rag_tool
+        from rag_base import RAGSystemFactory
+        
+        project_path = os.getenv('TEST_PROJ_PATH')
+        if not project_path:
+            print("❌ Установите переменную окружения TEST_PROJ_PATH")
+            return False
+        
+        # Получаем информацию о проекте
+        project_info = RAGSystemFactory.get_project_info(project_path)
+        print(f"🎯 Обнаружены технологии: {', '.join(project_info['detected_types'])}")
+        print(f"📊 Основной тип: {project_info['main_type']}")
+        
+        # Создаем инструменты для разных типов
+        available_types = ['python', 'universal', 'auto']
+        
+        for rag_type in available_types:
+            try:
+                print(f"🔧 Создаем {rag_type.upper()} RAG инструмент...")
+                tool = create_rag_tool(
+                    project_path=project_path,
+                    rag_type=rag_type,
+                    use_gpu=None  # Автоопределение
+                )
+                rag_tools[rag_type] = tool
+                print(f"✅ {rag_type.upper()} инструмент готов")
+            except Exception as e:
+                print(f"⚠️  Не удалось создать {rag_type} инструмент: {e}")
+        
+        return len(rag_tools) > 0
+        
     except ImportError as e:
-        print(f"❌ Ошибка импорта RAG инструментов: {e}")
+        print(f"❌ Ошибка импорта новой RAG архитектуры: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Ошибка инициализации: {e}")
         return False
 
-def auto_select_tool(question):
-    """Автоматический выбор инструмента."""
-    question_lower = question.lower()
-    class_keywords = ["класс", "class", "наследование", "inheritance", "использует", "inherited", "extends"]
+def select_rag_tool(rag_type, question):
+    """Выбор RAG инструмента."""
+    if rag_type == "auto":
+        # Автоматический выбор на основе проекта
+        if project_info:
+            main_type = project_info['main_type']
+            if main_type in rag_tools:
+                return rag_tools[main_type], f"Auto-selected {main_type.upper()}"
+        
+        # Fallback на универсальный
+        return rag_tools.get('universal'), "Auto-selected UNIVERSAL"
     
-    if any(keyword in question_lower for keyword in class_keywords):
-        return tool_llm_encoder, "LLM Embedder"
+    elif rag_type in rag_tools:
+        return rag_tools[rag_type], rag_type.upper()
+    
     else:
-        return tool_bge_code, "BGE Code"
+        # Fallback на любой доступный
+        if rag_tools:
+            fallback_type = list(rag_tools.keys())[0]
+            return rag_tools[fallback_type], f"Fallback to {fallback_type.upper()}"
+    
+    return None, "No tool available"
 
 @app.route('/')
 def index():
@@ -251,20 +360,20 @@ def analyze():
     try:
         data = request.json
         question = data.get('question', '').strip()
-        tool_choice = data.get('tool', 'auto')
+        rag_type = data.get('rag_type', 'auto')
+        use_gpu = data.get('use_gpu', 'auto')
         
         if not question:
             return jsonify({'success': False, 'error': 'Вопрос не может быть пустым'})
         
-        # Выбираем инструмент
-        if tool_choice == 'tool_llm_encoder':
-            selected_tool = tool_llm_encoder
-            tool_name = "LLM Embedder"
-        elif tool_choice == 'tool_bge_code':
-            selected_tool = tool_bge_code
-            tool_name = "BGE Code"
-        else:  # auto
-            selected_tool, tool_name = auto_select_tool(question)
+        # Выбираем RAG инструмент
+        selected_tool, rag_system_name = select_rag_tool(rag_type, question)
+        
+        if not selected_tool:
+            return jsonify({
+                'success': False, 
+                'error': 'Не удалось найти подходящий RAG инструмент'
+            })
         
         # Выполняем анализ
         result = selected_tool.invoke(question)
@@ -272,7 +381,12 @@ def analyze():
         return jsonify({
             'success': True,
             'result': result,
-            'tool_used': tool_name
+            'rag_system': rag_system_name,
+            'project_info': project_info,
+            'settings': {
+                'rag_type': rag_type,
+                'use_gpu': use_gpu
+            }
         })
         
     except Exception as e:
@@ -283,7 +397,17 @@ def analyze():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'tools_loaded': tool_llm_encoder is not None})
+    return jsonify({
+        'status': 'ok', 
+        'tools_loaded': len(rag_tools) > 0,
+        'available_rag_systems': list(rag_tools.keys()),
+        'project_info': project_info
+    })
+
+@app.route('/project-info')
+def get_project_info():
+    """Возвращает информацию о проекте"""
+    return jsonify(project_info if project_info else {'error': 'Project not analyzed'})
 
 if __name__ == '__main__':
     print("🚀 Запуск веб-интерфейса RAG системы...")
