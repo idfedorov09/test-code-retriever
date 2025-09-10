@@ -220,8 +220,11 @@ class ArchitectureFileParser(FileParser):
             elif ext in ['.yaml', '.yml']:
                 return yaml.safe_load(content)
             elif ext == '.toml':
-                import toml
-                return toml.loads(content)
+                try:
+                    import toml
+                    return toml.loads(content)
+                except ImportError:
+                    return {'content': content[:500], 'format': 'toml'}
             else:
                 # Для других форматов возвращаем базовую информацию
                 return {'content': content[:500]}
@@ -243,6 +246,14 @@ class ArchitectureFileParser(FileParser):
                     lineno=1,
                     end_lineno=1
                 ))
+            elif isinstance(deps, list):
+                elements.append(ArchitectureElement(
+                    name="dependencies",
+                    element_type="dependencies",
+                    description=f"External dependencies: {len(deps)} packages (list format)",
+                    lineno=1,
+                    end_lineno=1
+                ))
         
         # Анализируем скрипты
         if 'scripts' in config_data:
@@ -255,6 +266,14 @@ class ArchitectureFileParser(FileParser):
                     lineno=1,
                     end_lineno=1
                 ))
+            elif isinstance(scripts, list):
+                elements.append(ArchitectureElement(
+                    name="scripts",
+                    element_type="scripts",
+                    description=f"Build/run scripts: {len(scripts)} scripts (list format)",
+                    lineno=1,
+                    end_lineno=1
+                ))
         
         # Анализируем сервисы (для docker-compose)
         if 'services' in config_data:
@@ -264,10 +283,22 @@ class ArchitectureFileParser(FileParser):
                     elements.append(ArchitectureElement(
                         name=service_name,
                         element_type="service",
-                        description=f"Docker service: {service_config.get('image', 'custom')}",
+                        description=f"Docker service: {service_config.get('image', 'custom') if isinstance(service_config, dict) else 'custom'}",
                         lineno=1,
                         end_lineno=1
                     ))
+            elif isinstance(services, list):
+                # Если services - это список
+                for i, service in enumerate(services):
+                    if isinstance(service, dict):
+                        service_name = service.get('name', f'service_{i}')
+                        elements.append(ArchitectureElement(
+                            name=service_name,
+                            element_type="service",
+                            description=f"Docker service: {service.get('image', 'custom')}",
+                            lineno=1,
+                            end_lineno=1
+                        ))
         
         return elements
     
@@ -709,10 +740,14 @@ Reply in {answer_language}.
                     deps = file_map.config_data['dependencies']
                     if isinstance(deps, dict):
                         deps_info.append(f"  {file_map.path}: {len(deps)} dependencies")
+                    elif isinstance(deps, list):
+                        deps_info.append(f"  {file_map.path}: {len(deps)} dependencies (list)")
                 elif 'services' in file_map.config_data:
                     services = file_map.config_data['services']
                     if isinstance(services, dict):
                         deps_info.append(f"  {file_map.path}: {len(services)} services")
+                    elif isinstance(services, list):
+                        deps_info.append(f"  {file_map.path}: {len(services)} services (list)")
         
         return "\n".join(deps_info) if deps_info else ""
     
