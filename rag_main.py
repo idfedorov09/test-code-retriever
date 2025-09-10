@@ -5,11 +5,21 @@
 """
 
 import os
+import gc
 from dotenv import load_dotenv
 from pathlib import Path
 
 # Загружаем переменные окружения
 load_dotenv()
+
+# Импортируем систему управления памятью
+try:
+    from gpu_utils import GPUMemoryManager, cleanup_gpu, monitor_gpu
+    GPU_UTILS_AVAILABLE = True
+    gpu_manager = GPUMemoryManager()
+except ImportError:
+    GPU_UTILS_AVAILABLE = False
+    print("⚠️  GPU утилиты недоступны")
 
 # GPU detection and configuration
 try:
@@ -118,6 +128,14 @@ def create_rag_tool(
         rag_type = RAGSystemFactory.detect_project_type(project_path)
         print(f"🎯 Автоматически определен тип проекта: {rag_type}")
     
+    # Проверяем память перед загрузкой модели
+    if GPU_UTILS_AVAILABLE and use_gpu:
+        print("📊 Проверка памяти перед созданием RAG системы:")
+        monitor_gpu()
+        if gpu_manager.check_memory_threshold(75):
+            print("⚠️  Высокое использование памяти, выполняем очистку...")
+            cleanup_gpu()
+    
     # Выбор модели эмбеддингов в зависимости от типа
     if rag_type == "python":
         # Для Python проектов используем специализированную модель
@@ -158,6 +176,12 @@ def main():
         print("❌ Установите переменную окружения TEST_PROJ_PATH")
         return
     
+    # Начальная очистка памяти
+    if GPU_UTILS_AVAILABLE:
+        print("🧹 Начальная очистка GPU памяти...")
+        cleanup_gpu()
+        monitor_gpu()
+    
     print("🤖 Создание RAG инструментов...")
     
     # Создаем Python RAG инструмент
@@ -168,6 +192,12 @@ def main():
         use_gpu=True
     )
     
+    # Очистка памяти между созданиями инструментов
+    if GPU_UTILS_AVAILABLE:
+        print("🧹 Очистка памяти между инструментами...")
+        cleanup_gpu()
+        gc.collect()  # Дополнительная сборка мусора
+    
     # Создаем универсальный RAG инструмент
     print("\n" + "="*60)
     universal_tool = create_rag_tool(
@@ -175,6 +205,12 @@ def main():
         rag_type="universal",
         use_gpu=True
     )
+    
+    # Очистка памяти между созданиями инструментов
+    if GPU_UTILS_AVAILABLE:
+        print("🧹 Очистка памяти между инструментами...")
+        cleanup_gpu()
+        gc.collect()
     
     # Создаем автоматический RAG инструмент
     print("\n" + "="*60)
@@ -217,4 +253,39 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import signal
+    import atexit
+    
+    def cleanup_on_exit():
+        """Очистка ресурсов при завершении работы"""
+        print("\n🧹 Очистка ресурсов...")
+        if GPU_UTILS_AVAILABLE:
+            try:
+                from gpu_utils import aggressive_cleanup_gpu
+                aggressive_cleanup_gpu()
+                print("✅ GPU память очищена")
+            except Exception as e:
+                print(f"⚠️  Ошибка при очистке GPU: {e}")
+        gc.collect()
+        print("✅ Ресурсы освобождены")
+    
+    def signal_handler(sig, frame):
+        print("\n🛑 Получен сигнал завершения...")
+        cleanup_on_exit()
+        exit(0)
+    
+    # Регистрируем обработчики
+    atexit.register(cleanup_on_exit)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n🛑 Завершение работы...")
+    except Exception as e:
+        print(f"\n💥 Критическая ошибка: {e}")
+        if GPU_UTILS_AVAILABLE:
+            cleanup_gpu()
+    finally:
+        cleanup_on_exit()

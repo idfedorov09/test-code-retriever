@@ -284,6 +284,14 @@ HTML_TEMPLATE = """
 rag_tools = {}
 project_info = None
 
+# Импортируем менеджер GPU памяти
+try:
+    from gpu_utils import gpu_manager, cleanup_gpu, monitor_gpu
+    GPU_UTILS_AVAILABLE = True
+except ImportError:
+    GPU_UTILS_AVAILABLE = False
+    print("⚠️  GPU утилиты недоступны")
+
 def init_tools():
     """Инициализация RAG инструментов с новой архитектурой."""
     global rag_tools, project_info
@@ -292,6 +300,12 @@ def init_tools():
         import os
         from rag_main import create_rag_tool
         from rag_base import RAGSystemFactory
+        
+        # Очищаем GPU память перед инициализацией
+        if GPU_UTILS_AVAILABLE:
+            print("🧹 Очистка GPU памяти перед инициализацией...")
+            cleanup_gpu()
+            monitor_gpu()
         
         project_path = os.getenv('TEST_PROJ_PATH')
         if not project_path:
@@ -309,6 +323,12 @@ def init_tools():
         for rag_type in available_types:
             try:
                 print(f"🔧 Создаем {rag_type.upper()} RAG инструмент...")
+                
+                # Проверяем память перед созданием каждого инструмента
+                if GPU_UTILS_AVAILABLE and gpu_manager.check_memory_threshold(80):
+                    print("⚠️  Высокое использование памяти, выполняем очистку...")
+                    cleanup_gpu()
+                
                 tool = create_rag_tool(
                     project_path=project_path,
                     rag_type=rag_type,
@@ -316,8 +336,15 @@ def init_tools():
                 )
                 rag_tools[rag_type] = tool
                 print(f"✅ {rag_type.upper()} инструмент готов")
+                
+                # Мониторинг после создания
+                if GPU_UTILS_AVAILABLE:
+                    monitor_gpu()
+                
             except Exception as e:
                 print(f"⚠️  Не удалось создать {rag_type} инструмент: {e}")
+                if GPU_UTILS_AVAILABLE:
+                    cleanup_gpu()  # Очищаем память при ошибке
         
         return len(rag_tools) > 0
         
@@ -326,6 +353,8 @@ def init_tools():
         return False
     except Exception as e:
         print(f"❌ Ошибка инициализации: {e}")
+        if GPU_UTILS_AVAILABLE:
+            cleanup_gpu()
         return False
 
 def select_rag_tool(rag_type, question):
@@ -366,6 +395,12 @@ def analyze():
         if not question:
             return jsonify({'success': False, 'error': 'Вопрос не может быть пустым'})
         
+        # Проверяем состояние памяти перед выполнением
+        if GPU_UTILS_AVAILABLE:
+            if gpu_manager.check_memory_threshold(85):
+                print("⚠️  Критическое использование памяти, выполняем очистку...")
+                cleanup_gpu()
+        
         # Выбираем RAG инструмент
         selected_tool, rag_system_name = select_rag_tool(rag_type, question)
         
@@ -378,11 +413,21 @@ def analyze():
         # Выполняем анализ
         result = selected_tool.invoke(question)
         
+        # Очищаем память после выполнения
+        if GPU_UTILS_AVAILABLE:
+            cleanup_gpu()
+        
+        # Получаем информацию о памяти для ответа
+        memory_info = {}
+        if GPU_UTILS_AVAILABLE:
+            memory_info = gpu_manager.get_gpu_memory_info()
+        
         return jsonify({
             'success': True,
             'result': result,
             'rag_system': rag_system_name,
             'project_info': project_info,
+            'memory_info': memory_info,
             'settings': {
                 'rag_type': rag_type,
                 'use_gpu': use_gpu
@@ -390,6 +435,10 @@ def analyze():
         })
         
     except Exception as e:
+        # Очищаем память при ошибке
+        if GPU_UTILS_AVAILABLE:
+            cleanup_gpu()
+        
         return jsonify({
             'success': False,
             'error': str(e)
@@ -409,7 +458,67 @@ def get_project_info():
     """Возвращает информацию о проекте"""
     return jsonify(project_info if project_info else {'error': 'Project not analyzed'})
 
+@app.route('/memory-info')
+def get_memory_info():
+    """Возвращает информацию о состоянии GPU памяти"""
+    if GPU_UTILS_AVAILABLE:
+        return jsonify(gpu_manager.get_gpu_memory_info())
+    else:
+        return jsonify({'gpu_available': False, 'error': 'GPU utilities not available'})
+
+@app.route('/cleanup-memory', methods=['POST'])
+def cleanup_memory():
+    """Принудительная очистка GPU памяти"""
+    if GPU_UTILS_AVAILABLE:
+        try:
+            cleanup_gpu()
+            memory_info = gpu_manager.get_gpu_memory_info()
+            return jsonify({
+                'success': True, 
+                'message': 'Память очищена',
+                'memory_info': memory_info
+            })
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)})
+    else:
+        return jsonify({'success': False, 'error': 'GPU utilities not available'})
+
+def cleanup_on_exit():
+    """Очистка ресурсов при завершении работы"""
+    print("\n🧹 Очистка ресурсов...")
+    
+    if GPU_UTILS_AVAILABLE:
+        try:
+            from gpu_utils import aggressive_cleanup_gpu
+            aggressive_cleanup_gpu()
+            print("✅ GPU память очищена")
+        except Exception as e:
+            print(f"⚠️  Ошибка при очистке GPU: {e}")
+    
+    # Очищаем глобальные переменные
+    global rag_tools
+    rag_tools.clear()
+    
+    import gc
+    gc.collect()
+    print("✅ Ресурсы освобождены")
+
 if __name__ == '__main__':
+    import signal
+    import atexit
+    import sys
+    
+    # Регистрируем обработчики для корректного завершения
+    atexit.register(cleanup_on_exit)
+    
+    def signal_handler(sig, frame):
+        print("\n🛑 Получен сигнал завершения...")
+        cleanup_on_exit()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     print("🚀 Запуск веб-интерфейса RAG системы...")
     
     # Инициализируем инструменты
@@ -421,4 +530,9 @@ if __name__ == '__main__':
     print("🌐 Веб-интерфейс будет доступен по адресу: http://localhost:5000")
     print("💡 Нажмите Ctrl+C для остановки")
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    try:
+        app.run(debug=False, host='0.0.0.0', port=5000)
+    except KeyboardInterrupt:
+        print("\n🛑 Завершение работы...")
+    finally:
+        cleanup_on_exit()
