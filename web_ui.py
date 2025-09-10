@@ -3,9 +3,10 @@
 Веб-интерфейс для RAG системы анализа кода.
 Простой Flask-приложение для удобного использования через браузер.
 """
-
+import logging
 import sys
 import os
+import traceback
 from pathlib import Path
 from typing import Dict, List
 
@@ -17,6 +18,11 @@ from langchain_core.embeddings import Embeddings
 
 # Добавляем текущую директорию в путь для импорта
 sys.path.insert(0, str(Path(__file__).parent))
+
+from utils.logging.config import setup_logging
+setup_logging()
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -562,10 +568,6 @@ class EmbeddingsModelRegistry:
         return cls.get_embed('BAAI/bge-code-v1')
 
 
-def get_embeddings_model():
-    pass
-
-
 def init_tools():
     """Инициализация RAG инструментов с новой архитектурой."""
     global rag_tools, project_info
@@ -619,7 +621,9 @@ def init_tools():
                     monitor_gpu()
 
             except Exception as e:
-                print(f"⚠️  Не удалось создать {rag_type} инструмент: {e}")
+                error_message = traceback.format_exc()
+                logger.info(error_message)
+                logger.info(f"⚠️  Не удалось создать {rag_type} инструмент: {e}")
                 if GPU_UTILS_AVAILABLE:
                     cleanup_gpu()  # Очищаем память при ошибке
 
