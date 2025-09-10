@@ -7,8 +7,13 @@
 import sys
 import os
 from pathlib import Path
+from typing import Dict, List
+
 from flask import Flask, render_template_string, request, jsonify
 import json
+
+from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_core.embeddings import Embeddings
 
 # Добавляем текущую директорию в путь для импорта
 sys.path.insert(0, str(Path(__file__).parent))
@@ -509,67 +514,116 @@ project_info = None
 # Импортируем менеджер GPU памяти
 try:
     from gpu_utils import gpu_manager, cleanup_gpu, monitor_gpu
+
     GPU_UTILS_AVAILABLE = True
 except ImportError:
     GPU_UTILS_AVAILABLE = False
     print("⚠️  GPU утилиты недоступны")
 
+
+class EmbeddingsModelRegistry:
+    _embds: Dict[str, Embeddings] = {}
+    _is_loaded: bool = False
+
+    @classmethod
+    def load_models(cls):
+        if cls._is_loaded:
+            return
+
+        from rag_main import load_model
+        from rag_main import GPU_AVAILABLE
+
+        cls._embds.update({
+            'BAAI/llm-embedder': load_model(
+                model_name="BAAI/llm-embedder",
+                wrapper_cls=HuggingFaceBgeEmbeddings,
+                use_gpu=GPU_AVAILABLE
+            )
+        })
+
+        cls._embds.update({
+            'BAAI/bge-code-v1': load_model(
+                model_name="BAAI/bge-code-v1",
+                use_gpu=GPU_AVAILABLE
+            )
+        })
+
+        cls._is_loaded = True
+
+    @classmethod
+    def get_embed(cls, model_name: str) -> Embeddings:
+        return cls._embds.get(model_name)
+
+    @classmethod
+    def get_embed_by_rag_type(cls, rag_type: str) -> Embeddings:
+        if rag_type == "python":
+            return cls.get_embed('BAAI/llm-embedder')
+        return cls.get_embed('BAAI/bge-code-v1')
+
+
+def get_embeddings_model():
+    pass
+
+
 def init_tools():
     """Инициализация RAG инструментов с новой архитектурой."""
     global rag_tools, project_info
-    
+
     try:
         import os
         from rag_main import create_rag_tool
         from rag_base import RAGSystemFactory
-        
+
+        EmbeddingsModelRegistry.load_models()
+
         # Очищаем GPU память перед инициализацией
         if GPU_UTILS_AVAILABLE:
             print("🧹 Очистка GPU памяти перед инициализацией...")
             cleanup_gpu()
             monitor_gpu()
-        
+
         project_path = os.getenv('TEST_PROJ_PATH')
         if not project_path:
             print("❌ Установите переменную окружения TEST_PROJ_PATH")
             return False
-        
+
         # Получаем информацию о проекте
         project_info = RAGSystemFactory.get_project_info(project_path)
         print(f"🎯 Обнаружены технологии: {', '.join(project_info['detected_types'])}")
         print(f"📊 Основной тип: {project_info['main_type']}")
-        
+
         # Создаем инструменты для разных типов
         available_types = ['python', 'javascript', 'universal', 'auto']
-        
+
         for rag_type in available_types:
             try:
                 print(f"🔧 Создаем {rag_type.upper()} RAG инструмент...")
-                
+
                 # Проверяем память перед созданием каждого инструмента
                 if GPU_UTILS_AVAILABLE and gpu_manager.check_memory_threshold(80):
                     print("⚠️  Высокое использование памяти, выполняем очистку...")
                     cleanup_gpu()
-                
+
                 tool = create_rag_tool(
                     project_path=project_path,
+                    embeddings=EmbeddingsModelRegistry.get_embed_by_rag_type(rag_type),
                     rag_type=rag_type,
-                    use_gpu=None  # Автоопределение
+                    use_gpu=None
                 )
                 rag_tools[rag_type] = tool
                 print(f"✅ {rag_type.upper()} инструмент готов")
-                
+
                 # Мониторинг после создания
                 if GPU_UTILS_AVAILABLE:
                     monitor_gpu()
-                
+
             except Exception as e:
                 print(f"⚠️  Не удалось создать {rag_type} инструмент: {e}")
                 if GPU_UTILS_AVAILABLE:
                     cleanup_gpu()  # Очищаем память при ошибке
-        
+
         return len(rag_tools) > 0
-        
+
     except ImportError as e:
         print(f"❌ Ошибка импорта новой RAG архитектуры: {e}")
         return False
@@ -579,6 +633,7 @@ def init_tools():
             cleanup_gpu()
         return False
 
+
 def select_rag_tool(rag_type, question):
     """Выбор RAG инструмента."""
     if rag_type == "auto":
@@ -587,24 +642,26 @@ def select_rag_tool(rag_type, question):
             main_type = project_info['main_type']
             if main_type in rag_tools:
                 return rag_tools[main_type], f"Auto-selected {main_type.upper()}"
-        
+
         # Fallback на универсальный
         return rag_tools.get('universal'), "Auto-selected UNIVERSAL"
-    
+
     elif rag_type in rag_tools:
         return rag_tools[rag_type], rag_type.upper()
-    
+
     else:
         # Fallback на любой доступный
         if rag_tools:
             fallback_type = list(rag_tools.keys())[0]
             return rag_tools[fallback_type], f"Fallback to {fallback_type.upper()}"
-    
+
     return None, "No tool available"
+
 
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
+
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -613,47 +670,47 @@ def analyze():
         question = data.get('question', '').strip()
         rag_type = data.get('rag_type', 'auto')
         use_gpu = data.get('use_gpu', 'auto')
-        
+
         if not question:
             return jsonify({'success': False, 'error': 'Вопрос не может быть пустым'})
-        
+
         # Проверяем состояние памяти перед выполнением
         if GPU_UTILS_AVAILABLE:
             if gpu_manager.check_memory_threshold(85):
                 print("⚠️  Критическое использование памяти, выполняем очистку...")
                 cleanup_gpu()
-        
+
         # Выбираем RAG инструмент
         selected_tool, rag_system_name = select_rag_tool(rag_type, question)
-        
+
         if not selected_tool:
             return jsonify({
-                'success': False, 
+                'success': False,
                 'error': 'Не удалось найти подходящий RAG инструмент'
             })
-        
+
         # Выполняем анализ
         result = selected_tool.invoke(question)
-        
+
         # Убираем из ответа информацию о проекте и системе, так как она отображается в заголовке
         lines = result.split('\n')
         filtered_lines = []
         for line in lines:
-            if not (line.startswith('🎯 Проект:') or 
-                   line.startswith('📊 Использована система:') or
-                   (line.strip() == '' and len(filtered_lines) == 0)):  # Убираем пустые строки в начале
+            if not (line.startswith('🎯 Проект:') or
+                    line.startswith('📊 Использована система:') or
+                    (line.strip() == '' and len(filtered_lines) == 0)):  # Убираем пустые строки в начале
                 filtered_lines.append(line)
         result = '\n'.join(filtered_lines)
-        
+
         # Очищаем память после выполнения
         if GPU_UTILS_AVAILABLE:
             cleanup_gpu()
-        
+
         # Получаем информацию о памяти для ответа
         memory_info = {}
         if GPU_UTILS_AVAILABLE:
             memory_info = gpu_manager.get_gpu_memory_info()
-        
+
         return jsonify({
             'success': True,
             'result': result,
@@ -665,30 +722,33 @@ def analyze():
                 'use_gpu': use_gpu
             }
         })
-        
+
     except Exception as e:
         # Очищаем память при ошибке
         if GPU_UTILS_AVAILABLE:
             cleanup_gpu()
-        
+
         return jsonify({
             'success': False,
             'error': str(e)
         })
 
+
 @app.route('/health')
 def health():
     return jsonify({
-        'status': 'ok', 
+        'status': 'ok',
         'tools_loaded': len(rag_tools) > 0,
         'available_rag_systems': list(rag_tools.keys()),
         'project_info': project_info
     })
 
+
 @app.route('/project-info')
 def get_project_info():
     """Возвращает информацию о проекте"""
     return jsonify(project_info if project_info else {'error': 'Project not analyzed'})
+
 
 @app.route('/memory-info')
 def get_memory_info():
@@ -698,6 +758,7 @@ def get_memory_info():
     else:
         return jsonify({'gpu_available': False, 'error': 'GPU utilities not available'})
 
+
 @app.route('/cleanup-memory', methods=['POST'])
 def cleanup_memory():
     """Принудительная очистка GPU памяти"""
@@ -706,7 +767,7 @@ def cleanup_memory():
             cleanup_gpu()
             memory_info = gpu_manager.get_gpu_memory_info()
             return jsonify({
-                'success': True, 
+                'success': True,
                 'message': 'Память очищена',
                 'memory_info': memory_info
             })
@@ -715,10 +776,11 @@ def cleanup_memory():
     else:
         return jsonify({'success': False, 'error': 'GPU utilities not available'})
 
+
 def cleanup_on_exit():
     """Очистка ресурсов при завершении работы"""
     print("\n🧹 Очистка ресурсов...")
-    
+
     if GPU_UTILS_AVAILABLE:
         try:
             from gpu_utils import aggressive_cleanup_gpu
@@ -726,42 +788,45 @@ def cleanup_on_exit():
             print("✅ GPU память очищена")
         except Exception as e:
             print(f"⚠️  Ошибка при очистке GPU: {e}")
-    
+
     # Очищаем глобальные переменные
     global rag_tools
     rag_tools.clear()
-    
+
     import gc
     gc.collect()
     print("✅ Ресурсы освобождены")
+
 
 if __name__ == '__main__':
     import signal
     import atexit
     import sys
-    
+
     # Регистрируем обработчики для корректного завершения
     atexit.register(cleanup_on_exit)
-    
+
+
     def signal_handler(sig, frame):
         print("\n🛑 Получен сигнал завершения...")
         cleanup_on_exit()
         sys.exit(0)
-    
+
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     print("🚀 Запуск веб-интерфейса RAG системы...")
-    
+
     # Инициализируем инструменты
     if not init_tools():
         print("❌ Не удалось загрузить RAG инструменты")
         sys.exit(1)
-    
+
     print("✅ RAG инструменты загружены успешно!")
     print("🌐 Веб-интерфейс будет доступен по адресу: http://localhost:5000")
     print("💡 Нажмите Ctrl+C для остановки")
-    
+
     try:
         app.run(debug=False, host='0.0.0.0', port=5000)
     except KeyboardInterrupt:

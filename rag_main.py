@@ -9,6 +9,8 @@ import gc
 from dotenv import load_dotenv
 from pathlib import Path
 
+from langchain_core.embeddings import Embeddings
+
 # Загружаем переменные окружения
 load_dotenv()
 
@@ -53,13 +55,13 @@ def load_model(model_name, local_dir="./models", wrapper_cls=HuggingFaceEmbeddin
     """
     if use_gpu is None:
         use_gpu = GPU_AVAILABLE
-    
+
     local_path = Path(local_dir) / model_name.replace("/", "_")
-    
+
     # Конфигурация для GPU
     model_kwargs = {}
     encode_kwargs = {}
-    
+
     if use_gpu and GPU_AVAILABLE:
         model_kwargs.update({
             'device': DEVICE,
@@ -77,7 +79,7 @@ def load_model(model_name, local_dir="./models", wrapper_cls=HuggingFaceEmbeddin
             'batch_size': 8,  # Меньший batch_size для CPU
         })
         print(f"🐌 Загружаем {model_name} на CPU")
-    
+
     if local_path.exists():
         return wrapper_cls(
             model_name=str(local_path),
@@ -103,6 +105,7 @@ def load_model(model_name, local_dir="./models", wrapper_cls=HuggingFaceEmbeddin
 
 def create_rag_tool(
     project_path: str,
+    embeddings: Embeddings,
     rag_type: str = "auto",
     use_gpu: bool = None,
     **config
@@ -113,6 +116,7 @@ def create_rag_tool(
     Args:
         project_path: Путь к проекту
         rag_type: Тип RAG системы ("python", "universal", "auto")
+        embeddings: Модель эмбеддингов
         use_gpu: Использовать GPU (None = автоопределение)
         **config: Дополнительные параметры конфигурации
     """
@@ -137,21 +141,6 @@ def create_rag_tool(
             print("⚠️  Высокое использование памяти, выполняем очистку...")
             cleanup_gpu()
     
-    # Выбор модели эмбеддингов в зависимости от типа
-    if rag_type == "python":
-        # Для Python проектов используем специализированную модель
-        embeddings = load_model(
-            model_name="BAAI/llm-embedder",
-            wrapper_cls=HuggingFaceBgeEmbeddings,
-            use_gpu=use_gpu
-        )
-    else:
-        # Для универсальных проектов используем кодовую модель
-        embeddings = load_model(
-            model_name="BAAI/bge-code-v1",
-            use_gpu=use_gpu
-        )
-    
     # Создание RAG системы
     print(f"🔧 Создаем {rag_type.upper()} RAG систему...")
     
@@ -167,126 +156,3 @@ def create_rag_tool(
     
     print(f"✅ {rag_type.upper()} RAG инструмент готов!")
     return tool
-
-
-def main():
-    """Основная функция для демонстрации"""
-    
-    project_path = os.getenv('TEST_PROJ_PATH')
-    if not project_path:
-        print("❌ Установите переменную окружения TEST_PROJ_PATH")
-        return
-    
-    # Начальная очистка памяти
-    if GPU_UTILS_AVAILABLE:
-        print("🧹 Начальная очистка GPU памяти...")
-        cleanup_gpu()
-        monitor_gpu()
-    
-    print("🤖 Создание RAG инструментов...")
-    
-    # Создаем Python RAG инструмент
-    print("\n" + "="*60)
-    python_tool = create_rag_tool(
-        project_path=project_path,
-        rag_type="python",
-        use_gpu=True
-    )
-    
-    # Очистка памяти между созданиями инструментов
-    if GPU_UTILS_AVAILABLE:
-        print("🧹 Очистка памяти между инструментами...")
-        cleanup_gpu()
-        gc.collect()  # Дополнительная сборка мусора
-    
-    # Создаем универсальный RAG инструмент
-    print("\n" + "="*60)
-    universal_tool = create_rag_tool(
-        project_path=project_path,
-        rag_type="universal",
-        use_gpu=True
-    )
-    
-    # Очистка памяти между созданиями инструментов
-    if GPU_UTILS_AVAILABLE:
-        print("🧹 Очистка памяти между инструментами...")
-        cleanup_gpu()
-        gc.collect()
-    
-    # Создаем автоматический RAG инструмент
-    print("\n" + "="*60)
-    auto_tool = create_rag_tool(
-        project_path=project_path,
-        rag_type="auto",
-        use_gpu=True
-    )
-    
-    # Тестовые запросы
-    print("\n" + "="*60)
-    print("🧪 ТЕСТИРОВАНИЕ ИНСТРУМЕНТОВ")
-    print("="*60)
-    
-    test_questions = [
-        "Как используется класс PrefixedDBModel?",
-        "Какие есть конфигурационные файлы в проекте?",
-        "Есть ли Docker файлы и как они настроены?",
-    ]
-    
-    tools = {
-        "Python RAG": python_tool,
-        "Universal RAG": universal_tool,
-        "Auto RAG": auto_tool
-    }
-    
-    for question in test_questions:
-        print(f"\n❓ Вопрос: {question}")
-        print("-" * 50)
-        
-        for tool_name, tool in tools.items():
-            try:
-                print(f"\n🔍 {tool_name}:")
-                result = tool.invoke(question)
-                print(result[:200] + "..." if len(result) > 200 else result)
-            except Exception as e:
-                print(f"❌ Ошибка в {tool_name}: {e}")
-        
-        print("\n" + "="*60)
-
-
-if __name__ == "__main__":
-    import signal
-    import atexit
-    
-    def cleanup_on_exit():
-        """Очистка ресурсов при завершении работы"""
-        print("\n🧹 Очистка ресурсов...")
-        if GPU_UTILS_AVAILABLE:
-            try:
-                from gpu_utils import aggressive_cleanup_gpu
-                aggressive_cleanup_gpu()
-                print("✅ GPU память очищена")
-            except Exception as e:
-                print(f"⚠️  Ошибка при очистке GPU: {e}")
-        gc.collect()
-        print("✅ Ресурсы освобождены")
-    
-    def signal_handler(sig, frame):
-        print("\n🛑 Получен сигнал завершения...")
-        cleanup_on_exit()
-        exit(0)
-    
-    # Регистрируем обработчики
-    atexit.register(cleanup_on_exit)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n🛑 Завершение работы...")
-    except Exception as e:
-        print(f"\n💥 Критическая ошибка: {e}")
-        if GPU_UTILS_AVAILABLE:
-            cleanup_gpu()
-    finally:
-        cleanup_on_exit()
