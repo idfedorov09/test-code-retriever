@@ -8,13 +8,8 @@ services:
     container_name: rag-web-gpu
     ports:
       - "5000:5000"
-    environment:
-      - TEST_PROJ_PATH=/app/project
-      - PYTHONPATH=/app
-      - FLASK_ENV=production
-      - CUDA_VISIBLE_DEVICES=0
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    env_file:
+      - .env
     volumes:
       - .:/app/project:ro
       - ./models:/app/models:ro
