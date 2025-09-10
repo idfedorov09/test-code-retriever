@@ -7,7 +7,7 @@ Python-специфичная реализация RAG системы.
 from __future__ import annotations
 
 import ast
-import os
+import os, json
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 
@@ -536,6 +536,9 @@ Reply in {answer_language}.
     def _answer_question(self, question: str, index: ProjectIndex) -> str:
         # Retrieve relevant documents
         retrieved = index.retriever.invoke(question)
+
+        evidence_char_budget = 20000 # TODO: to tool call param
+        max_evidence_items = 8
         
         # Gather context
         map_text = self._gather_map_snippets(retrieved, self.config.get('map_char_budget', 24000))
@@ -550,8 +553,22 @@ Reply in {answer_language}.
             "max_items": self.config.get('max_evidence_items', 8),
         })
         
-        # Parse evidence plan (simplified)
-        evidence_text = "(no additional bodies requested)"  # Placeholder
+        plan_json = raw_plan.strip()
+        plan_json = plan_json[plan_json.find("[") : plan_json.rfind("]") + 1] if "[" in plan_json and "]" in plan_json else "[]"
+        try:
+            plan = json.loads(plan_json)
+            if not isinstance(plan, list):
+                plan = []
+        except Exception:
+            plan = []
+
+        # 2.5) Normalize planner paths to repo-relative
+        plan = self._normalize_plan_paths(plan, index.root, index.files) if plan else []
+
+        # 3) Fetch requested bodies
+        evidence_pairs = self._extract_bodies(index.root, plan[:max_evidence_items]) if plan else []
+        evidence_text = "\n\n".join([f"### {lbl}\n" + code for (lbl, code) in evidence_pairs])
+        evidence_text = self._trim_to_chars(evidence_text, evidence_char_budget)
         
         # Generate final answer
         answer_prompt = ChatPromptTemplate.from_template(self.get_answer_prompt_template())
@@ -561,11 +578,65 @@ Reply in {answer_language}.
             "question": question,
             "map_text": map_text,
             "answer_language": self.config.get('answer_language', 'ru'),
-            "evidence_text": evidence_text,
+            "evidence_text": evidence_text if evidence_text else "(no additional bodies requested)",
         })
         
         return final
     
+    def _normalize_plan_paths(self, plan: List[Dict[str, str]], root: str, known_rel_paths: List[str]) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        for item in plan:
+            rel = self._coerce_repo_relative_path(root, item.get("file", ""), known_rel_paths)
+            if rel:
+                item["file"] = rel
+                normalized.append(item)
+        return normalized
+    
+    def _coerce_repo_relative_path(self, root: str, candidate: str, known_rel_paths: List[str]) -> str:
+        """Return repo-relative path for various candidate formats.
+        Handles absolute paths inside repo, mixed slashes, ./ prefixes, and bare basenames.
+        If ambiguous, prefers shortest path depth.
+        Returns empty string if cannot resolve reliably.
+        """
+        s = (candidate or "").strip().strip('"').strip("'")
+        if not s:
+            return ""
+        s = s.replace("\\", os.sep).replace("//", "/")
+        s = s.lstrip("./")
+        # Make relative if absolute under root
+        try:
+            if os.path.isabs(s):
+                s = os.path.relpath(os.path.normpath(s), root)
+        except Exception:
+            pass
+        s = os.path.normpath(s)
+
+        # Direct hit
+        if s in known_rel_paths:
+            return s
+
+        # Try endswith match (e.g., src/pkg/file.py -> pkg/file.py)
+        ends = [p for p in known_rel_paths if p.endswith(s)]
+        if len(ends) == 1:
+            return ends[0]
+
+        # Try basename match
+        base = os.path.basename(s)
+        cands = [p for p in known_rel_paths if os.path.basename(p) == base]
+        if len(cands) == 1:
+            return cands[0]
+
+        pool = ends or cands
+        if pool:
+            # pick the shallowest path as a heuristic
+            return sorted(pool, key=lambda x: (x.count(os.sep), len(x)))[0]
+
+        # Last resort: file physically exists
+        if os.path.isfile(os.path.join(root, s)):
+            return s
+
+        return ""
+
     def _gather_map_snippets(self, docs: List[Document], max_chars: int = 20000) -> str:
         pieces = []
         for d in docs:
