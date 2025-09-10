@@ -605,7 +605,7 @@ class UniversalRAGSystem(BaseRAGSystem):
         
         # Консервативная конфигурация по умолчанию для предотвращения проблем с памятью
         default_config = {
-            'max_documents': 10000,          # Максимум документов для индексации
+            'max_documents': 1000,          # Максимум документов для индексации
             'max_chunks_per_file': 100,      # Максимум чанков на файл
             'max_file_size_kb': 1000,        # Максимальный размер файла в KB
             'faiss_batch_size': 20,        # Размер батча для FAISS
@@ -696,7 +696,7 @@ Reply in {answer_language}.
         docs = []
         universal_maps = [fm for fm in file_maps if isinstance(fm, UniversalFileMap)]
         
-        MAX_DOCS = self.config.get('max_documents', 10000)  # Увеличено для лучшего покрытия
+        MAX_DOCS = self.config.get('max_documents', 1000)  # Увеличено для лучшего покрытия
         MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 100)  # Увеличено
         MAX_FILE_SIZE = self.config.get('max_file_size_kb', 1000)  # Увеличено
         

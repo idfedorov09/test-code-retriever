@@ -67,26 +67,49 @@ class ArchitectureFileMap(BaseFileMap):
         if self.is_config:
             parts.append("CONFIG:")
             if isinstance(self.config_data, dict):
+                # Ограничиваем количество ключей для больших конфигов
+                items_shown = 0
+                max_config_items = 8
                 for key, value in self.config_data.items():
+                    if items_shown >= max_config_items:
+                        remaining = len(self.config_data) - max_config_items
+                        parts.append(f"  ... and {remaining} more config items")
+                        break
+                    
                     if isinstance(value, (dict, list)):
-                        parts.append(f"  {key}: {json.dumps(value, indent=2)[:200]}...")
+                        # Ограничиваем размер сложных структур
+                        value_str = json.dumps(value, indent=2)
+                        if len(value_str) > 200:
+                            value_str = value_str[:200] + "..."
+                        parts.append(f"  {key}: {value_str}")
                     else:
-                        parts.append(f"  {key}: {str(value)[:100]}")
+                        parts.append(f"  {key}: {str(value)[:80]}")
+                    items_shown += 1
             elif isinstance(self.config_data, list):
                 parts.append(f"  List with {len(self.config_data)} items")
-                for i, item in enumerate(self.config_data[:10]):  # Показываем только первые 10 элементов
+                # Показываем только первые 3 элемента для экономии места
+                for i, item in enumerate(self.config_data[:3]):
                     if isinstance(item, (dict, list)):
-                        parts.append(f"  [{i}]: {json.dumps(item, indent=2)[:150]}...")
+                        item_str = json.dumps(item, indent=2)
+                        if len(item_str) > 150:
+                            item_str = item_str[:150] + "..."
+                        parts.append(f"  [{i}]: {item_str}")
                     else:
-                        parts.append(f"  [{i}]: {str(item)[:100]}")
-                if len(self.config_data) > 5:
-                    parts.append(f"  ... and {len(self.config_data) - 5} more items")
+                        parts.append(f"  [{i}]: {str(item)[:80]}")
+                if len(self.config_data) > 3:
+                    parts.append(f"  ... and {len(self.config_data) - 3} more items")
             else:
-                parts.append(f"  {str(self.config_data)[:200]}")
+                parts.append(f"  {str(self.config_data)[:150]}")
         
         if self.elements:
             parts.append("ELEMENTS:")
-            for elem in self.elements:
+            # Ограничиваем количество элементов
+            max_elements = 10
+            for i, elem in enumerate(self.elements):
+                if i >= max_elements:
+                    remaining = len(self.elements) - max_elements
+                    parts.append(f"  ... and {remaining} more elements")
+                    break
                 parts.append(f"  - {elem.to_line()}")
         
         parts.append(f"LOC: {self.loc}")
@@ -691,19 +714,38 @@ Reply in {answer_language}.
         docs = []
         arch_maps = [fm for fm in file_maps if isinstance(fm, ArchitectureFileMap)]
         
-        # Создаем документы из карт файлов
+        # Создаем документы из карт файлов с чанкингом
         for fm in arch_maps:
             content = fm.to_text()
-            meta = {
-                "source": fm.path, 
-                "type": "arch-map", 
-                "file_type": fm.file_type,
-                "size": fm.file_size,
-                "is_config": fm.is_config,
-                "is_docker": fm.is_docker,
-                "is_documentation": fm.is_documentation
-            }
-            docs.append(Document(page_content=content, metadata=meta))
+            
+            # Если документ слишком большой, разбиваем на чанки
+            max_chunk_size = self.config.get('max_chunk_size', 4000)
+            if len(content) > max_chunk_size:
+                chunks = self._split_into_chunks(content, max_chunk_size)
+                for i, chunk in enumerate(chunks):
+                    meta = {
+                        "source": fm.path, 
+                        "type": "arch-map", 
+                        "file_type": fm.file_type,
+                        "size": fm.file_size,
+                        "is_config": fm.is_config,
+                        "is_docker": fm.is_docker,
+                        "is_documentation": fm.is_documentation,
+                        "chunk_id": i,
+                        "total_chunks": len(chunks)
+                    }
+                    docs.append(Document(page_content=chunk, metadata=meta))
+            else:
+                meta = {
+                    "source": fm.path, 
+                    "type": "arch-map", 
+                    "file_type": fm.file_type,
+                    "size": fm.file_size,
+                    "is_config": fm.is_config,
+                    "is_docker": fm.is_docker,
+                    "is_documentation": fm.is_documentation
+                }
+                docs.append(Document(page_content=content, metadata=meta))
         
         # Добавляем сводку по архитектурным паттернам
         patterns = self._extract_architectural_patterns(arch_maps)
@@ -788,6 +830,31 @@ Reply in {answer_language}.
         
         return "\n".join(structure_info)
     
+    def _split_into_chunks(self, text: str, max_size: int) -> List[str]:
+        """Разбивает текст на чанки по строкам, сохраняя контекст"""
+        lines = text.split('\n')
+        chunks = []
+        current_chunk = []
+        current_size = 0
+        
+        for line in lines:
+            line_size = len(line) + 1  # +1 для символа новой строки
+            
+            # Если добавление этой строки превысит лимит, сохраняем текущий чанк
+            if current_size + line_size > max_size and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_size = line_size
+            else:
+                current_chunk.append(line)
+                current_size += line_size
+        
+        # Добавляем последний чанк
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+    
     def _build_search_index(
         self, 
         docs: List[Document], 
@@ -798,24 +865,56 @@ Reply in {answer_language}.
         bm25 = BM25Retriever.from_documents(docs)
         bm25.k = self.config.get('bm25_k', 15)
         
-        # FAISS retriever
-        faiss = FAISS.from_documents(docs, self.embeddings, distance_strategy=DistanceStrategy.COSINE)
-        dense_retriever = faiss.as_retriever(search_kwargs={"k": self.config.get('dense_k', 15)})
+        # Для больших проектов используем только BM25, чтобы избежать проблем с памятью
+        max_docs_for_embeddings = self.config.get('max_docs_for_embeddings', 1000)
+        if len(docs) > max_docs_for_embeddings:
+            print(f"⚠️  Большой проект ({len(docs)} документов), используем только BM25 для экономии памяти")
+            retriever = bm25
+        else:
+            try:
+                # Ограничиваем размер документов для эмбеддингов
+                max_chars_per_doc = self.config.get('max_chars_per_doc_for_embeddings', 6000)
+                processed_docs = []
+                
+                for doc in docs:
+                    if len(doc.page_content) > max_chars_per_doc:
+                        # Обрезаем длинные документы
+                        truncated_content = doc.page_content[:max_chars_per_doc] + "\n... [truncated]"
+                        processed_doc = Document(
+                            page_content=truncated_content,
+                            metadata=doc.metadata
+                        )
+                        processed_docs.append(processed_doc)
+                    else:
+                        processed_docs.append(doc)
+                
+                # FAISS retriever с обработкой ошибок памяти
+                faiss = FAISS.from_documents(processed_docs, self.embeddings, distance_strategy=DistanceStrategy.COSINE)
+                dense_retriever = faiss.as_retriever(search_kwargs={"k": self.config.get('dense_k', 15)})
+                
+                # Ensemble retriever
+                ensemble = EnsembleRetriever(
+                    retrievers=[bm25, dense_retriever], 
+                    weights=list(self.config.get('ensemble_weights', (0.4, 0.6)))
+                )
+                retriever = ensemble
+                
+            except Exception as e:
+                print(f"⚠️  Ошибка создания эмбеддингов: {e}")
+                print("🔄 Используем только BM25 retriever")
+                retriever = bm25
         
-        # Ensemble retriever
-        ensemble = EnsembleRetriever(
-            retrievers=[bm25, dense_retriever], 
-            weights=list(self.config.get('ensemble_weights', (0.4, 0.6)))
-        )
-        
-        # Optional compression
-        retriever = ensemble
-        if self.config.get('use_compression', True):
-            compressor = LLMChainExtractor.from_llm(self.llm)
-            retriever = ContextualCompressionRetriever(
-                base_compressor=compressor, 
-                base_retriever=ensemble
-            )
+        # Optional compression (только если не было ошибок с памятью)
+        if self.config.get('use_compression', True) and retriever != bm25:
+            try:
+                compressor = LLMChainExtractor.from_llm(self.llm)
+                retriever = ContextualCompressionRetriever(
+                    base_compressor=compressor, 
+                    base_retriever=retriever
+                )
+            except Exception as e:
+                print(f"⚠️  Ошибка создания компрессора: {e}")
+                print("🔄 Используем retriever без компрессии")
         
         return ProjectIndex(
             root=project_path,
