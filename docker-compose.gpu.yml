@@ -11,8 +11,8 @@ services:
     env_file:
       - .env
     volumes:
-      - .:/app/project:ro
-      - ./models:/app/models:ro
+      - ./foodgram-main:/app/foodgram-main:ro
+      - ./models:/app/models
     restart: unless-stopped
     deploy:
       resources:

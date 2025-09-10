@@ -1,0 +1,24 @@
+langchain-core~=0.3.75
+langchain-huggingface~=0.3.1
+langchain-community~=0.3.29
+langchain~=0.3.27
+networkx~=3.5
+pyan3~=1.2.0
+
+sentence-transformers~=5.1.0
+torch>=2.0.0  # Для GPU поддержки
+accelerate>=0.20.0  # Для оптимизации GPU
+rank-bm25~=0.2.2
+# faiss-cpu~=1.12.0  # Заменено на GPU версию
+# faiss-gpu~=1.12.0
+faiss-gpu-cu12==1.12.0
+
+# Try with older yandexcloud version for protobuf compatibility
+grpcio~=1.74.0
+grpcio-tools~=1.74.0
+yandexcloud~=0.280.0
+
+dotenv~=0.9.9
+
+# Web interface
+flask~=3.0.0
