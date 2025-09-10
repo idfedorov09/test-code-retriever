@@ -472,7 +472,29 @@ class UniversalRAGSystem(BaseRAGSystem):
     def __init__(self, llm, embeddings, **kwargs):
         parsers = [UniversalFileParser()]
         analyzers = []  # Пока без специальных анализаторов
-        super().__init__(llm, embeddings, parsers, analyzers, **kwargs)
+        
+        # Консервативная конфигурация по умолчанию для предотвращения проблем с памятью
+        default_config = {
+            'max_documents': 500,          # Максимум документов для индексации
+            'max_chunks_per_file': 5,      # Максимум чанков на файл
+            'max_file_size_kb': 50,        # Максимальный размер файла в KB
+            'faiss_batch_size': 25,        # Размер батча для FAISS
+            'bm25_k': 8,                   # Количество документов для BM25
+            'dense_k': 8,                  # Количество документов для dense retrieval
+            'ensemble_weights': (0.6, 0.4), # BM25 приоритетнее
+            'map_char_budget': 16000,      # Бюджет символов для контекста
+            'answer_language': 'ru'
+        }
+        
+        # Объединяем с пользовательской конфигурацией
+        merged_config = {**default_config, **kwargs}
+        
+        super().__init__(llm, embeddings, parsers, analyzers, **merged_config)
+        
+        print(f"⚙️  Universal RAG конфигурация:")
+        print(f"   📄 Макс документов: {self.config.get('max_documents')}")
+        print(f"   📦 Размер FAISS батча: {self.config.get('faiss_batch_size')}")
+        print(f"   🔍 Чанков на файл: {self.config.get('max_chunks_per_file')}")
     
     def get_file_patterns(self) -> Dict[str, str]:
         return {"all": "**/*"}  # Все файлы
@@ -529,29 +551,58 @@ Reply in {answer_language}.
         docs = []
         universal_maps = [fm for fm in file_maps if isinstance(fm, UniversalFileMap)]
         
+        # Ограничения для предотвращения проблем с памятью
+        MAX_DOCS = self.config.get('max_documents', 1000)
+        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 10)
+        MAX_FILE_SIZE = self.config.get('max_file_size_kb', 100)  # KB
+        
+        print(f"📊 Создание документов: {len(universal_maps)} файлов")
+        print(f"⚙️  Ограничения: макс {MAX_DOCS} документов, {MAX_CHUNKS_PER_FILE} чанков/файл")
+        
+        doc_count = 0
+        
+        # Сортируем файлы по размеру (сначала маленькие)
+        universal_maps.sort(key=lambda fm: fm.loc)
+        
         # Create documents from file maps
         for fm in universal_maps:
-            # Создаем документ для всего файла
-            file_content = fm.to_text()
-            docs.append(Document(
-                page_content=file_content,
-                metadata={"source": fm.path, "type": f"{fm.file_type}-map", "loc": fm.loc}
-            ))
+            if doc_count >= MAX_DOCS:
+                print(f"⚠️  Достигнут лимит документов ({MAX_DOCS}), пропускаем остальные файлы")
+                break
             
-            # Создаем документы для каждого чанка с контекстом
+            # Пропускаем слишком большие файлы
+            file_size_kb = fm.loc * 0.05  # Примерная оценка размера
+            if file_size_kb > MAX_FILE_SIZE:
+                print(f"⚠️  Пропускаем большой файл: {fm.path} (~{file_size_kb:.1f}KB)")
+                continue
+            
+            # Создаем документ для всего файла (только для небольших файлов)
+            if fm.loc < 200:  # Только файлы меньше 200 строк
+                file_content = fm.to_text()
+                docs.append(Document(
+                    page_content=file_content,
+                    metadata={"source": fm.path, "type": f"{fm.file_type}-map", "loc": fm.loc}
+                ))
+                doc_count += 1
+            
+            # Создаем документы для ключевых чанков (ограниченное количество)
             context_prompt = UniversalFileParser.CONTEXT_PROMPTS.get(fm.file_type, "")
             
-            for chunk in fm.chunks:
-                chunk_content = f"""
-FILE: {fm.path} (type: {fm.file_type})
+            # Выбираем наиболее важные чанки
+            important_chunks = self._select_important_chunks(fm.chunks, MAX_CHUNKS_PER_FILE)
+            
+            for chunk in important_chunks:
+                if doc_count >= MAX_DOCS:
+                    break
+                    
+                chunk_content = f"""FILE: {fm.path} (type: {fm.file_type})
 CONTEXT: {context_prompt}
 CHUNK: {chunk.name} ({chunk.chunk_type})
 
-CONTENT:
 {chunk.content}
 
-KEYWORDS: {', '.join(chunk.keywords)}
-"""
+KEYWORDS: {', '.join(chunk.keywords[:5])}"""  # Ограничиваем количество ключевых слов
+                
                 docs.append(Document(
                     page_content=chunk_content,
                     metadata={
@@ -561,6 +612,7 @@ KEYWORDS: {', '.join(chunk.keywords)}
                         "chunk_type": chunk.chunk_type
                     }
                 ))
+                doc_count += 1
         
         # Создаем сводный документ по типам файлов
         file_types_summary = ["PROJECT FILE TYPES SUMMARY:"]
@@ -576,8 +628,38 @@ KEYWORDS: {', '.join(chunk.keywords)}
             page_content="\n".join(file_types_summary),
             metadata={"source": "__file_types__", "type": "project-summary"}
         ))
+        doc_count += 1
         
+        print(f"✅ Создано {doc_count} документов (из {len(universal_maps)} файлов)")
         return docs
+    
+    def _select_important_chunks(self, chunks: List[UniversalCodeChunk], max_chunks: int) -> List[UniversalCodeChunk]:
+        """Выбирает наиболее важные чанки для индексации"""
+        if len(chunks) <= max_chunks:
+            return chunks
+        
+        # Приоритет по типу чанка
+        priority_order = {
+            'class': 3,
+            'function': 2,
+            'configuration': 2,
+            'docker_command': 1,
+            'generic': 0,
+            'text_section': 0
+        }
+        
+        # Сортируем по приоритету и размеру
+        sorted_chunks = sorted(
+            chunks,
+            key=lambda c: (
+                priority_order.get(c.chunk_type, 0),
+                len(c.keywords),  # Больше ключевых слов = важнее
+                len(c.content)    # Больше контента = важнее
+            ),
+            reverse=True
+        )
+        
+        return sorted_chunks[:max_chunks]
     
     def _build_search_index(
         self, 
@@ -585,20 +667,102 @@ KEYWORDS: {', '.join(chunk.keywords)}
         project_path: str, 
         file_maps: List[BaseFileMap]
     ) -> ProjectIndex:
-        # BM25 retriever
+        print(f"🏗️  Построение поискового индекса для {len(docs)} документов...")
+        
+        # Импортируем GPU утилиты если доступны
+        try:
+            from gpu_utils import cleanup_gpu, monitor_gpu, gpu_manager
+            GPU_UTILS_AVAILABLE = True
+        except ImportError:
+            GPU_UTILS_AVAILABLE = False
+        
+        # BM25 retriever (быстрый, не использует GPU)
+        print("📝 Создание BM25 индекса...")
         bm25 = BM25Retriever.from_documents(docs)
         bm25.k = self.config.get('bm25_k', 12)
         
-        # FAISS retriever
-        faiss = FAISS.from_documents(docs, self.embeddings, distance_strategy=DistanceStrategy.COSINE)
+        # FAISS retriever с батчевой обработкой
+        print("🔍 Создание FAISS индекса...")
+        
+        # Проверяем память перед созданием FAISS
+        if GPU_UTILS_AVAILABLE:
+            if gpu_manager.check_memory_threshold(70):
+                print("⚠️  Высокое использование памяти, выполняем очистку...")
+                cleanup_gpu()
+            monitor_gpu()
+        
+        try:
+            # Батчевая обработка для больших наборов документов
+            batch_size = self.config.get('faiss_batch_size', 50)  # Консервативный размер
+            
+            if len(docs) > batch_size:
+                print(f"📦 Батчевая обработка: {len(docs)} документов по {batch_size}")
+                
+                # Создаем FAISS индекс по частям
+                first_batch = docs[:batch_size]
+                faiss = FAISS.from_documents(
+                    first_batch, 
+                    self.embeddings, 
+                    distance_strategy=DistanceStrategy.COSINE
+                )
+                
+                # Добавляем остальные документы батчами
+                remaining_docs = docs[batch_size:]
+                for i in range(0, len(remaining_docs), batch_size):
+                    batch = remaining_docs[i:i + batch_size]
+                    batch_num = i // batch_size + 2
+                    total_batches = (len(docs) - 1) // batch_size + 1
+                    print(f"📦 Обработка батча {batch_num}/{total_batches} ({len(batch)} документов)")
+                    
+                    # Очистка памяти между батчами
+                    if GPU_UTILS_AVAILABLE:
+                        cleanup_gpu()
+                    
+                    # Добавляем батч к существующему индексу
+                    batch_texts = [doc.page_content for doc in batch]
+                    batch_metadatas = [doc.metadata for doc in batch]
+                    faiss.add_texts(batch_texts, batch_metadatas)
+            else:
+                # Обычная обработка для небольших наборов
+                print(f"📄 Обычная обработка для {len(docs)} документов")
+                faiss = FAISS.from_documents(
+                    docs, 
+                    self.embeddings, 
+                    distance_strategy=DistanceStrategy.COSINE
+                )
+            
+            print("✅ FAISS индекс создан успешно")
+            
+        except Exception as e:
+            print(f"❌ Ошибка создания FAISS индекса: {e}")
+            if GPU_UTILS_AVAILABLE:
+                cleanup_gpu()
+            
+            # Fallback: используем только BM25
+            print("🔄 Переключаемся на BM25-only режим")
+            return ProjectIndex(
+                root=project_path,
+                docs=docs,
+                retriever=bm25,
+                file_maps=file_maps
+            )
+        
+        # Очистка памяти после создания индекса
+        if GPU_UTILS_AVAILABLE:
+            cleanup_gpu()
+            print("📊 Финальное состояние памяти:")
+            monitor_gpu()
+        
         dense_retriever = faiss.as_retriever(search_kwargs={"k": self.config.get('dense_k', 12)})
         
         # Ensemble retriever
+        print("🤝 Создание ensemble retriever...")
         ensemble = EnsembleRetriever(
             retrievers=[bm25, dense_retriever], 
             weights=list(self.config.get('ensemble_weights', (0.5, 0.5)))
         )
         
+        print("✅ Поисковый индекс готов!")
         return ProjectIndex(
             root=project_path,
             docs=docs,
