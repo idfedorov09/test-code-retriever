@@ -253,11 +253,6 @@ class JavaScriptFileParser(FileParser):
         return 'javascript'
 
     def parse(self, file_path: str, root: str) -> Optional[JSFileMap]:
-        """Парсит файл и возвращает его представление (протокол FileParser)"""
-        return self.parse_file(file_path)
-
-    def parse_file(self, file_path: str) -> JSFileMap:
-        """Парсит JavaScript файл и создает карту"""
         try:
             content = _read_text(file_path)
             lines = content.splitlines()
@@ -276,9 +271,9 @@ class JavaScriptFileParser(FileParser):
             
             # Анализируем вызовы функций
             self._analyze_function_calls(functions, content)
-            
+
             return JSFileMap(
-                path=file_path,
+                path=_relpath(file_path, root),
                 file_type=file_type,
                 loc=loc,
                 imports=imports,
@@ -802,9 +797,11 @@ Evidence planning rules:
 - For Node.js questions, look for server files and APIs
 - For testing questions, look for test files
 - For build questions, look for config files (webpack, babel, etc.)
+- For questions about specific files (like "auth-context.js"), always request the whole file with symbol "*"
+- For questions about file structure or implementation, request the whole file with symbol "*"
 
 Respond ONLY with JSON array, no prose.
-Example: ["file.js::functionName", "component.tsx::*", "config.webpack.js::*"]"""),
+Example: [{"file": "auth-context.js", "symbol": "*"}, {"file": "component.tsx", "symbol": "MyComponent"}, {"file": "config.webpack.js", "symbol": "*"}]"""),
             ("human", "Question:\n{question}\n\nContext (map snippets):\n{context}\n")
         ])
 
@@ -910,18 +907,21 @@ SOURCE: {var.source or 'local'}"""
         print(f"✅ Создано {len(docs)} документов")
         return docs
 
-    def _extract_bodies(self, symbols: List[str], project_path: str) -> List[Tuple[str, str]]:
-        """Извлекает тела функций/классов по символам"""
+    def _extract_bodies(self, requests: List[Dict[str, str]], project_path: str) -> List[Tuple[str, str]]:
+        """Извлекает тела функций/классов по запросам"""
         out = []
         
-        for sym in symbols:
-            if '::' not in sym:
+        for req in requests:
+            file_path = req.get("file", "")
+            symbol = req.get("symbol", "")
+            
+            if not file_path:
                 continue
                 
-            file_path, symbol = sym.split('::', 1)
             full_path = os.path.join(project_path, file_path)
             
             if not os.path.exists(full_path):
+                print(f"⚠️  Файл не найден: {full_path}")
                 continue
             
             try:
@@ -1020,7 +1020,7 @@ SOURCE: {var.source or 'local'}"""
             plan = []
 
         # Извлекаем запрошенные тела функций/классов
-        evidence_pairs = self._extract_bodies(index.root, plan[:max_evidence_items]) if plan else []
+        evidence_pairs = self._extract_bodies(plan[:max_evidence_items], index.root) if plan else []
         evidence_text = "\n\n".join([f"### {lbl}\n" + code for (lbl, code) in evidence_pairs])
         evidence_text = self._trim_to_chars(evidence_text, evidence_char_budget)
         
@@ -1060,12 +1060,68 @@ SOURCE: {var.source or 'local'}"""
         """Ищет символ в файле и возвращает соответствующий фрагмент"""
         lines = content.splitlines()
         
+        # Если запрашивается весь файл
+        if symbol == '*':
+            max_lines = self.config.get('max_file_lines', 200)  # Максимум строк для полного файла
+            max_chars = self.config.get('max_file_chars', 15000)  # Максимум символов
+            
+            if len(lines) <= max_lines and len(content) <= max_chars:
+                # Файл небольшой - показываем полностью
+                result = f"# Полное содержимое {file_path}\n\n"
+                result += "```javascript\n"
+                for i, line in enumerate(lines, 1):
+                    result += f"{i:4d}: {line}\n"
+                result += "```\n"
+                return (f"{file_path}:1-{len(lines)}", result)
+            else:
+                # Файл большой - показываем структурированно
+                result = f"# Структура файла {file_path} ({len(lines)} строк, {len(content)} символов)\n\n"
+                
+                # Показываем начало файла
+                result += "## 📄 Начало файла\n\n"
+                result += "```javascript\n"
+                for i, line in enumerate(lines[:30], 1):
+                    result += f"{i:4d}: {line}\n"
+                result += "```\n\n"
+                
+                # Анализируем структуру файла
+                result += self._analyze_file_structure(content, file_path)
+                
+                # Показываем конец файла если файл большой
+                if len(lines) > 60:
+                    result += "## 📄 Конец файла\n\n"
+                    result += "```javascript\n"
+                    for i, line in enumerate(lines[-20:], len(lines) - 19):
+                        result += f"{i:4d}: {line}\n"
+                    result += "```\n\n"
+                
+                # Добавляем полное содержимое (обрезанное)
+                result += "## 📄 Полное содержимое (первые 8000 символов)\n\n"
+                result += "```javascript\n"
+                result += content[:8000]
+                if len(content) > 8000:
+                    result += "\n\n... [truncated - файл слишком большой]"
+                result += "\n```\n"
+                
+                return (f"{file_path}:1-{len(lines)}", result)
+        
         # Ищем по имени функции/класса/переменной
         for i, line in enumerate(lines):
-            if symbol in line:
-                # Находим начало блока
-                start_line = max(0, i - 2)
-                end_line = min(len(lines), i + 20)
+            stripped_line = line.strip()
+            
+            # Точное совпадение с началом определения
+            if (stripped_line.startswith(f'function {symbol}') or
+                stripped_line.startswith(f'const {symbol}') or
+                stripped_line.startswith(f'let {symbol}') or
+                stripped_line.startswith(f'var {symbol}') or
+                stripped_line.startswith(f'class {symbol}') or
+                stripped_line.startswith(f'export const {symbol}') or
+                stripped_line.startswith(f'export function {symbol}') or
+                stripped_line.startswith(f'export default {symbol}')):
+                
+                # Находим конец блока
+                start_line = i
+                end_line = self._find_block_end(lines, i)
                 
                 result = f"# {symbol} in {file_path}\n\n"
                 result += "```javascript\n"
@@ -1075,6 +1131,193 @@ SOURCE: {var.source or 'local'}"""
                 
                 return (f"{file_path}:{start_line+1}-{end_line}", result)
         
+        # Если не найдено точное совпадение, ищем частичное
+        for i, line in enumerate(lines):
+            if symbol in line and not line.strip().startswith('//'):
+                # Находим начало и конец блока
+                start_line = max(0, i - 2)
+                end_line = min(len(lines), i + 15)
+                
+                result = f"# {symbol} в {file_path} (приблизительно)\n\n"
+                result += "```javascript\n"
+                for j in range(start_line, end_line):
+                    result += f"{j+1:4d}: {lines[j]}\n"
+                result += "```\n"
+                
+                return (f"{file_path}:{start_line+1}-{end_line}", result)
+        
+        return None
+
+    def _find_block_end(self, lines: List[str], start_line: int) -> int:
+        """Находит конец блока кода (функции, класса, etc.)"""
+        brace_count = 0
+        in_string = False
+        escape_next = False
+        
+        for i in range(start_line, len(lines)):
+            line = lines[i]
+            
+            for char in line:
+                if escape_next:
+                    escape_next = False
+                    continue
+                    
+                if char == '\\':
+                    escape_next = True
+                    continue
+                    
+                if char in ['"', "'", '`'] and not in_string:
+                    in_string = True
+                    continue
+                elif char in ['"', "'", '`'] and in_string:
+                    in_string = False
+                    continue
+                    
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            return i + 1
+        
+        return len(lines)
+
+    def _analyze_file_structure(self, content: str, file_path: str) -> str:
+        """Анализирует структуру JavaScript файла"""
+        lines = content.splitlines()
+        result = "## 📊 Анализ структуры файла\n\n"
+        
+        # Считаем функции, классы, импорты, экспорты
+        functions = []
+        classes = []
+        imports = []
+        exports = []
+        variables = []
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            
+            # Функции
+            if (stripped.startswith('function ') or 
+                stripped.startswith('const ') and '=' in stripped and ('=>' in stripped or 'function' in stripped) or
+                stripped.startswith('async function ')):
+                func_name = self._extract_function_name(stripped)
+                if func_name:
+                    functions.append(f"Строка {i}: {func_name}")
+            
+            # Классы
+            elif stripped.startswith('class '):
+                class_name = self._extract_class_name(stripped)
+                if class_name:
+                    classes.append(f"Строка {i}: {class_name}")
+            
+            # Импорты
+            elif stripped.startswith('import '):
+                imports.append(f"Строка {i}: {stripped}")
+            
+            # Экспорты
+            elif stripped.startswith('export '):
+                exports.append(f"Строка {i}: {stripped}")
+            
+            # Переменные (const, let, var)
+            elif (stripped.startswith('const ') or 
+                  stripped.startswith('let ') or 
+                  stripped.startswith('var ')) and '=' in stripped:
+                var_name = self._extract_variable_name(stripped)
+                if var_name:
+                    variables.append(f"Строка {i}: {var_name}")
+        
+        # Выводим структуру
+        if imports:
+            result += f"**Импорты ({len(imports)}):**\n"
+            for imp in imports[:10]:  # Максимум 10 импортов
+                result += f"- {imp}\n"
+            if len(imports) > 10:
+                result += f"... и еще {len(imports) - 10} импортов\n"
+            result += "\n"
+        
+        if exports:
+            result += f"**Экспорты ({len(exports)}):**\n"
+            for exp in exports[:10]:  # Максимум 10 экспортов
+                result += f"- {exp}\n"
+            if len(exports) > 10:
+                result += f"... и еще {len(exports) - 10} экспортов\n"
+            result += "\n"
+        
+        if classes:
+            result += f"**Классы ({len(classes)}):**\n"
+            for cls in classes[:10]:  # Максимум 10 классов
+                result += f"- {cls}\n"
+            if len(classes) > 10:
+                result += f"... и еще {len(classes) - 10} классов\n"
+            result += "\n"
+        
+        if functions:
+            result += f"**Функции ({len(functions)}):**\n"
+            for func in functions[:15]:  # Максимум 15 функций
+                result += f"- {func}\n"
+            if len(functions) > 15:
+                result += f"... и еще {len(functions) - 15} функций\n"
+            result += "\n"
+        
+        if variables:
+            result += f"**Переменные ({len(variables)}):**\n"
+            for var in variables[:10]:  # Максимум 10 переменных
+                result += f"- {var}\n"
+            if len(variables) > 10:
+                result += f"... и еще {len(variables) - 10} переменных\n"
+            result += "\n"
+        
+        # Статистика
+        result += f"**Статистика:**\n"
+        result += f"- Всего строк: {len(lines)}\n"
+        result += f"- Непустых строк: {len([l for l in lines if l.strip()])}\n"
+        result += f"- Размер: {len(content):,} символов\n"
+        
+        return result
+
+    def _extract_function_name(self, line: str) -> Optional[str]:
+        """Извлекает имя функции из строки"""
+        import re
+        
+        patterns = [
+            r'function\s+(\w+)',
+            r'const\s+(\w+)\s*=',
+            r'let\s+(\w+)\s*=',
+            r'var\s+(\w+)\s*=',
+            r'async\s+function\s+(\w+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                return match.group(1)
+        return None
+
+    def _extract_class_name(self, line: str) -> Optional[str]:
+        """Извлекает имя класса из строки"""
+        import re
+        
+        match = re.search(r'class\s+(\w+)', line)
+        if match:
+            return match.group(1)
+        return None
+
+    def _extract_variable_name(self, line: str) -> Optional[str]:
+        """Извлекает имя переменной из строки"""
+        import re
+        
+        patterns = [
+            r'const\s+(\w+)',
+            r'let\s+(\w+)',
+            r'var\s+(\w+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                return match.group(1)
         return None
 
     def _get_tool_description(self) -> str:
