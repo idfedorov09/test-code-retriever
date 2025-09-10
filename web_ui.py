@@ -22,110 +22,272 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RAG - Анализ Python Кода</title>
+    <title>RAG - Анализ Кода</title>
+    <!-- Подключаем marked.js для рендеринга markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Подключаем highlight.js для подсветки синтаксиса -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
             padding: 20px;
-            background: #f5f5f5;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
         }
         .container {
             background: white;
-            border-radius: 10px;
+            border-radius: 15px;
             padding: 30px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            backdrop-filter: blur(10px);
         }
         h1 {
             color: #333;
             text-align: center;
             margin-bottom: 30px;
+            font-size: 2.2em;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
         .form-group {
             margin-bottom: 20px;
         }
         label {
             display: block;
-            margin-bottom: 5px;
+            margin-bottom: 8px;
             font-weight: 600;
             color: #555;
+            font-size: 14px;
         }
         input[type="text"], select, textarea {
             width: 100%;
-            padding: 12px;
-            border: 2px solid #ddd;
-            border-radius: 8px;
+            padding: 14px 16px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
             font-size: 16px;
-            transition: border-color 0.3s;
+            transition: all 0.3s ease;
+            background: #fafbfc;
         }
         input[type="text"]:focus, select:focus, textarea:focus {
             outline: none;
-            border-color: #007bff;
+            border-color: #667eea;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
         button {
-            background: #007bff;
+            background: linear-gradient(45deg, #667eea, #764ba2);
             color: white;
             border: none;
-            padding: 12px 30px;
-            border-radius: 8px;
+            padding: 14px 32px;
+            border-radius: 10px;
             font-size: 16px;
+            font-weight: 600;
             cursor: pointer;
-            transition: background 0.3s;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
         }
         button:hover {
-            background: #0056b3;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
         }
         button:disabled {
             background: #ccc;
             cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }
         .result {
             margin-top: 30px;
-            padding: 20px;
+            background: white;
+            border-radius: 12px;
+            border: 1px solid #e1e5e9;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }
+        .result-header {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            padding: 15px 20px;
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .result-content {
+            padding: 25px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 15px;
+            line-height: 1.6;
+            color: #333;
+        }
+        .result-content h1, .result-content h2, .result-content h3, .result-content h4, .result-content h5, .result-content h6 {
+            color: #2c3e50;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+        .result-content h1 { font-size: 24px; border-bottom: 2px solid #667eea; padding-bottom: 8px; }
+        .result-content h2 { font-size: 20px; border-bottom: 1px solid #e1e5e9; padding-bottom: 5px; }
+        .result-content h3 { font-size: 18px; }
+        .result-content p {
+            margin-bottom: 16px;
+        }
+        .result-content ul, .result-content ol {
+            margin-bottom: 16px;
+            padding-left: 25px;
+        }
+        .result-content li {
+            margin-bottom: 8px;
+        }
+        .result-content blockquote {
+            border-left: 4px solid #667eea;
+            padding: 15px 20px;
+            margin: 20px 0;
+            background: #f8f9fc;
+            border-radius: 0 8px 8px 0;
+            font-style: italic;
+        }
+        .result-content code {
+            background: #f1f3f4;
+            padding: 3px 6px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 14px;
+            color: #d63384;
+        }
+        .result-content pre {
             background: #f8f9fa;
+            border: 1px solid #e9ecef;
             border-radius: 8px;
-            border-left: 4px solid #007bff;
-            white-space: pre-wrap;
-            font-family: 'Monaco', 'Menlo', monospace;
+            padding: 20px;
+            overflow-x: auto;
+            margin: 20px 0;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
             font-size: 14px;
             line-height: 1.5;
         }
+        .result-content pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+        .result-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .result-content th, .result-content td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .result-content th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+        }
+        .result-content strong {
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        .result-content em {
+            color: #6c757d;
+            font-style: italic;
+        }
+        .project-info-badge {
+            display: inline-block;
+            background: linear-gradient(45deg, #28a745, #20c997);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-right: 8px;
+        }
+        .rag-system-badge {
+            display: inline-block;
+            background: linear-gradient(45deg, #ffc107, #fd7e14);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
         .error {
-            border-left-color: #dc3545;
-            background: #f8d7da;
+            border: 1px solid #dc3545;
+        }
+        .error .result-header {
+            background: linear-gradient(45deg, #dc3545, #c82333);
+        }
+        .error .result-content {
             color: #721c24;
+            background: #f8d7da;
         }
         .loading {
             text-align: center;
             color: #666;
+            padding: 40px;
+            font-size: 16px;
+        }
+        .loading::after {
+            content: '';
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-left: 10px;
+            border: 3px solid #667eea;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s ease-in-out infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
         .examples {
-            margin-top: 20px;
-            padding: 15px;
-            background: #e9ecef;
-            border-radius: 8px;
+            margin-top: 25px;
+            padding: 20px;
+            background: linear-gradient(135deg, #f8f9fc 0%, #e9ecef 100%);
+            border-radius: 12px;
+            border: 1px solid #e1e5e9;
         }
         .examples h3 {
             margin-top: 0;
+            margin-bottom: 15px;
             color: #495057;
+            font-size: 16px;
+            font-weight: 600;
         }
         .example {
             background: white;
-            padding: 8px 12px;
-            margin: 5px 0;
-            border-radius: 4px;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 8px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.3s ease;
+            border: 1px solid #e9ecef;
+            font-size: 14px;
         }
         .example:hover {
-            background: #f8f9fa;
+            background: #667eea;
+            color: white;
+            transform: translateX(5px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🤖 RAG - Анализ Python Кода</h1>
+        <h1>🤖 RAG - Анализ Кода</h1>
         
         <form id="questionForm">
             <div class="form-group">
@@ -156,20 +318,29 @@ HTML_TEMPLATE = """
         
         <div class="examples">
             <h3>💡 Примеры вопросов:</h3>
-            <div class="example" onclick="setQuestion('Как используется класс PrefixedDBModel?')">
-                Как используется класс PrefixedDBModel?
+            <div class="example" onclick="setQuestion('Покажи мне код любого файла Docker')">
+                🐳 Покажи мне код любого файла Docker
             </div>
-            <div class="example" onclick="setQuestion('Какие функции вызывают метод render?')">
-                Какие функции вызывают метод render?
+            <div class="example" onclick="setQuestion('Какие есть конфигурационные файлы?')">
+                ⚙️ Какие есть конфигурационные файлы?
             </div>
             <div class="example" onclick="setQuestion('Покажи архитектуру проекта')">
-                Покажи архитектуру проекта
+                🏗️ Покажи архитектуру проекта
             </div>
-            <div class="example" onclick="setQuestion('Какие есть Docker файлы?')">
-                Какие есть Docker файлы?
+            <div class="example" onclick="setQuestion('Как используется класс PrefixedDBModel?')">
+                🐍 Как используется класс PrefixedDBModel?
             </div>
             <div class="example" onclick="setQuestion('Есть ли проблемы с безопасностью?')">
-                Есть ли проблемы с безопасностью?
+                🔒 Есть ли проблемы с безопасностью?
+            </div>
+            <div class="example" onclick="setQuestion('Какие JavaScript файлы есть в проекте?')">
+                ⚡ Какие JavaScript файлы есть в проекте?
+            </div>
+            <div class="example" onclick="setQuestion('Покажи содержимое package.json')">
+                📦 Покажи содержимое package.json
+            </div>
+            <div class="example" onclick="setQuestion('Какие переменные окружения используются?')">
+                🌍 Какие переменные окружения используются?
             </div>
         </div>
         
@@ -178,7 +349,12 @@ HTML_TEMPLATE = """
             <div id="project-details"></div>
         </div>
         
-        <div id="result" class="result" style="display: none;"></div>
+        <div id="result" class="result" style="display: none;">
+            <div class="result-header">
+                <span id="result-header-text">📊 Результат анализа</span>
+            </div>
+            <div id="result-content" class="result-content"></div>
+        </div>
     </div>
 
     <script>
@@ -223,6 +399,22 @@ HTML_TEMPLATE = """
             }
         });
         
+        // Настройка marked.js для рендеринга markdown
+        if (typeof marked !== 'undefined') {
+            marked.setOptions({
+                highlight: function(code, lang) {
+                    if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                        try {
+                            return hljs.highlight(code, { language: lang }).value;
+                        } catch (err) {}
+                    }
+                    return code;
+                },
+                breaks: true,
+                gfm: true
+            });
+        }
+
         document.getElementById('questionForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
@@ -232,12 +424,16 @@ HTML_TEMPLATE = """
             const use_gpu = formData.get('use_gpu');
             
             const resultDiv = document.getElementById('result');
+            const resultHeaderText = document.getElementById('result-header-text');
+            const resultContent = document.getElementById('result-content');
             const submitButton = document.querySelector('button[type="submit"]');
             
             // Показываем загрузку
             resultDiv.style.display = 'block';
-            resultDiv.className = 'result loading';
-            resultDiv.textContent = '🔄 Анализируем код... Это может занять несколько секунд.';
+            resultDiv.className = 'result';
+            resultHeaderText.innerHTML = '🔄 Анализ в процессе...';
+            resultContent.className = 'result-content loading';
+            resultContent.innerHTML = 'Анализируем код... Это может занять несколько секунд.';
             submitButton.disabled = true;
             
             try {
@@ -253,24 +449,49 @@ HTML_TEMPLATE = """
                 
                 if (data.success) {
                     resultDiv.className = 'result';
-                    let resultText = data.result;
                     
-                    // Добавляем информацию о проекте если есть
-                    if (data.project_info) {
+                    // Создаем заголовок с информацией о проекте и системе
+                    let headerInfo = '📊 Результат анализа';
+                    if (data.project_info && data.rag_system) {
                         const info = data.project_info;
-                        resultText = `🎯 Проект: ${info.main_type.toUpperCase()}` + 
-                                   (info.is_multi_tech ? ` (мульти-технологии: ${info.detected_types.join(', ')})` : '') + 
-                                   `\\n📊 Использована система: ${data.rag_system}\\n\\n` + resultText;
+                        const projectBadge = `<span class="project-info-badge">🎯 ${info.main_type.toUpperCase()}${info.is_multi_tech ? ' (мульти-технологии)' : ''}</span>`;
+                        const ragBadge = `<span class="rag-system-badge">📊 ${data.rag_system}</span>`;
+                        headerInfo = projectBadge + ragBadge;
                     }
+                    resultHeaderText.innerHTML = headerInfo;
                     
-                    resultDiv.textContent = resultText;
+                    // Рендерим markdown ответ
+                    resultContent.className = 'result-content';
+                    if (typeof marked !== 'undefined') {
+                        try {
+                            const htmlContent = marked.parse(data.result);
+                            resultContent.innerHTML = htmlContent;
+                            
+                            // Применяем подсветку синтаксиса
+                            if (typeof hljs !== 'undefined') {
+                                resultContent.querySelectorAll('pre code').forEach((block) => {
+                                    hljs.highlightElement(block);
+                                });
+                            }
+                        } catch (err) {
+                            console.error('Ошибка рендеринга markdown:', err);
+                            resultContent.textContent = data.result;
+                        }
+                    } else {
+                        // Fallback если marked.js не загружен
+                        resultContent.innerHTML = data.result.replace(/\\n/g, '<br>');
+                    }
                 } else {
                     resultDiv.className = 'result error';
-                    resultDiv.textContent = '❌ Ошибка: ' + data.error;
+                    resultHeaderText.innerHTML = '❌ Ошибка анализа';
+                    resultContent.className = 'result-content';
+                    resultContent.textContent = data.error;
                 }
             } catch (error) {
                 resultDiv.className = 'result error';
-                resultDiv.textContent = '❌ Ошибка соединения: ' + error.message;
+                resultHeaderText.innerHTML = '❌ Ошибка соединения';
+                resultContent.className = 'result-content';
+                resultContent.textContent = error.message;
             } finally {
                 submitButton.disabled = false;
             }
@@ -412,6 +633,16 @@ def analyze():
         
         # Выполняем анализ
         result = selected_tool.invoke(question)
+        
+        # Убираем из ответа информацию о проекте и системе, так как она отображается в заголовке
+        lines = result.split('\n')
+        filtered_lines = []
+        for line in lines:
+            if not (line.startswith('🎯 Проект:') or 
+                   line.startswith('📊 Использована система:') or
+                   (line.strip() == '' and len(filtered_lines) == 0)):  # Убираем пустые строки в начале
+                filtered_lines.append(line)
+        result = '\n'.join(filtered_lines)
         
         # Очищаем память после выполнения
         if GPU_UTILS_AVAILABLE:
