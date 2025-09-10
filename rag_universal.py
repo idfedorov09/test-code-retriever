@@ -153,17 +153,32 @@ class UniversalFileParser(FileParser):
     def _detect_file_type(self, path: str) -> str:
         """Определяет тип файла по расширению и содержимому"""
         ext = Path(path).suffix.lower()
-        
-        # Специальные случаи
         filename = Path(path).name.lower()
-        if 'dockerfile' in filename:
+        
+        # Специальные случаи по имени файла
+        if 'dockerfile' in filename or filename == 'dockerfile':
             return 'dockerfile'
-        if filename in {'makefile', 'cmake', 'cmakelists.txt'}:
+        if 'docker-compose' in filename:
+            return 'dockerfile'  # Тоже Docker
+        if filename in {'makefile', 'cmake', 'cmakelists.txt', 'rakefile'}:
             return 'build'
-        if filename.startswith('.'):
+        if filename in {'requirements.txt', 'package.json', 'composer.json', 'gemfile', 'cargo.toml', 'go.mod'}:
+            return 'config'
+        if filename.startswith('.env'):
+            return 'env'
+        if filename in {'readme.md', 'readme.rst', 'readme.txt', 'readme'}:
+            return 'markdown'
+        if filename.startswith('.') and not filename.endswith(('.py', '.js', '.ts')):
             return 'config'
         
-        return self.FILE_TYPE_PATTERNS.get(ext, 'text')
+        # По расширению
+        file_type = self.FILE_TYPE_PATTERNS.get(ext, 'text')
+        
+        # Дополнительные проверки для конфигурационных файлов
+        if file_type == 'text' and ext in {'.conf', '.cfg', '.ini', '.properties'}:
+            return 'config'
+        
+        return file_type
     
     def _split_into_chunks(self, content: str, file_type: str) -> List[UniversalCodeChunk]:
         """Разбивает контент на логические части"""
@@ -639,19 +654,62 @@ KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограни
         if universal_maps:
             file_types_summary = ["PROJECT OVERVIEW:"]
             type_counts = {}
+            files_by_type = {}
+            
             for fm in universal_maps:
                 type_counts[fm.file_type] = type_counts.get(fm.file_type, 0) + 1
+                if fm.file_type not in files_by_type:
+                    files_by_type[fm.file_type] = []
+                files_by_type[fm.file_type].append(fm.path)
             
             # Ограничиваем количество типов в сводке
-            for file_type, count in sorted(type_counts.items())[:10]:  # Только первые 10 типов
-                context = UniversalFileParser.CONTEXT_PROMPTS.get(file_type, "")[:50]  # Обрезаем описание
+            for file_type, count in sorted(type_counts.items())[:15]:  # Увеличено до 15 типов
+                context = UniversalFileParser.CONTEXT_PROMPTS.get(file_type, "")[:50]
                 file_types_summary.append(f"  {file_type}: {count} files - {context}")
+                
+                # Добавляем конкретные имена файлов для важных типов
+                if file_type in ['dockerfile', 'yaml', 'json', 'python', 'javascript', 'typescript', 'react'] and count <= 10:
+                    files_list = files_by_type[file_type][:8]  # Увеличено до 8 файлов
+                    file_types_summary.append(f"    Files: {', '.join(files_list)}")
+                    if len(files_by_type[file_type]) > 8:
+                        file_types_summary.append(f"    ... and {len(files_by_type[file_type]) - 8} more")
             
             docs.append(Document(
                 page_content="\n".join(file_types_summary),
                 metadata={"source": "__overview__", "type": "project-summary"}
             ))
             doc_count += 1
+            
+            # Создаем специальные документы для важных типов файлов с содержимым
+            important_types = ['dockerfile', 'yaml', 'json', 'shell', 'config', 'env']
+            for file_type in important_types:
+                if file_type in files_by_type and len(files_by_type[file_type]) <= 12:
+                    if doc_count >= MAX_DOCS - 5:  # Оставляем место для других документов
+                        break
+                        
+                    type_summary = [f"{file_type.upper()} FILES IN PROJECT:"]
+                    for fm in [f for f in universal_maps if f.file_type == file_type][:8]:  # Максимум 8 файлов этого типа
+                        type_summary.append(f"  FILE: {fm.path} ({fm.loc} lines)")
+                        
+                        # Добавляем ключевые слова и зависимости
+                        if fm.keywords:
+                            key_words = fm.keywords[:5]
+                            type_summary.append(f"    Keywords: {', '.join(key_words)}")
+                        if fm.dependencies:
+                            deps = fm.dependencies[:3]
+                            type_summary.append(f"    Dependencies: {', '.join(deps)}")
+                        
+                        # Для очень важных типов добавляем краткое содержимое
+                        if file_type in ['dockerfile', 'env'] and fm.chunks:
+                            first_chunk = fm.chunks[0]
+                            if len(first_chunk.content) < 500:  # Только короткие файлы
+                                type_summary.append(f"    Content preview: {first_chunk.content[:200]}...")
+                    
+                    docs.append(Document(
+                        page_content="\n".join(type_summary),
+                        metadata={"source": f"__{file_type}_files__", "type": f"{file_type}-files-summary"}
+                    ))
+                    doc_count += 1
         
         print(f"✅ Создано {doc_count} документов (из {len(universal_maps)} файлов)")
         return docs
@@ -869,32 +927,72 @@ KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограни
     def _extract_bodies(self, root: str, requests: List[Dict[str, str]]) -> List[Tuple[str, str]]:
         """Return list of (label, code_block) for requested {file,symbol}."""
         out: List[Tuple[str, str]] = []
+        
+        # Сначала собираем все доступные файлы для лучшего поиска
+        available_files = {}
+        for root_dir, dirs, files in os.walk(root):
+            # Пропускаем ненужные директории
+            dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'}]
+            for file in files:
+                file_path = os.path.join(root_dir, file)
+                rel_path = os.path.relpath(file_path, root)
+                available_files[file.lower()] = rel_path
+                available_files[rel_path.lower()] = rel_path
+        
         for req in requests:
-            rel = req.get("file", "")
-            sym = req.get("symbol", "")
-            target = os.path.join(root, rel)
-            if not os.path.isfile(target):
+            rel = req.get("file", "").strip()
+            sym = req.get("symbol", "").strip()
+            
+            if not rel:
+                continue
+            
+            # Пытаемся найти файл разными способами
+            target_path = None
+            
+            # 1. Прямой путь
+            direct_path = os.path.join(root, rel)
+            if os.path.isfile(direct_path):
+                target_path = direct_path
+            
+            # 2. Поиск по имени файла (case-insensitive)
+            elif rel.lower() in available_files:
+                target_path = os.path.join(root, available_files[rel.lower()])
+            
+            # 3. Поиск по частичному совпадению
+            else:
+                rel_lower = rel.lower()
+                for filename, filepath in available_files.items():
+                    if (rel_lower in filename or 
+                        filename in rel_lower or
+                        rel_lower in filepath.lower() or
+                        filepath.lower().endswith(rel_lower)):
+                        target_path = os.path.join(root, filepath)
+                        break
+            
+            if not target_path or not os.path.isfile(target_path):
                 continue
             
             try:
-                src = _read_text(target)
+                src = _read_text(target_path)
+                rel_for_output = os.path.relpath(target_path, root)
             except Exception:
                 continue
 
             # Для универсального парсера упрощаем логику извлечения
-            if sym == "*":
+            if sym == "*" or not sym:
                 # Возвращаем весь файл (с ограничением размера)
-                content = src[:3000] + "...[truncated]" if len(src) > 3000 else src
-                out.append((f"{rel}:1", content))
+                content = src[:4000] + "...[truncated]" if len(src) > 4000 else src
+                out.append((f"{rel_for_output}:1", content))
             else:
                 # Ищем конкретный чанк или символ
-                found = self._find_symbol_in_file(src, sym, rel)
+                found = self._find_symbol_in_file(src, sym, rel_for_output)
                 if found:
                     out.append(found)
                 else:
-                    # Fallback: возвращаем начало файла
-                    content = src[:1500] + "...[truncated]" if len(src) > 1500 else src
-                    out.append((f"{rel}:1", content))
+                    # Fallback: возвращаем начало файла с указанием что символ не найден
+                    content = f"# Symbol '{sym}' not found in file, showing full content:\n\n"
+                    content += src[:3000] + "...[truncated]" if len(src) > 3000 else src
+                    out.append((f"{rel_for_output}:1", content))
 
         return out
     
@@ -923,12 +1021,34 @@ KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограни
     
     def _gather_map_snippets(self, docs: List[Document], max_chars: int = 20000) -> str:
         pieces = []
-        for d in docs:
-            if d.metadata.get("type") in ("project-summary", "python-map", "javascript-map", "dockerfile-map", 
-                                        "yaml-map", "json-map", "text-map", "universal-chunk"):
-                pieces.append(f"---\n{d.page_content}\n")
+        
+        # Приоритизируем документы по важности
+        priority_types = [
+            "project-summary",
+            "dockerfile-files-summary", "yaml-files-summary", "json-files-summary", 
+            "shell-files-summary", "config-files-summary", "env-files-summary",
+            "python-map", "javascript-map", "typescript-map", "react-map",
+            "dockerfile-map", "yaml-map", "json-map", "text-map", "markdown-map"
+        ]
+        
+        # Сначала добавляем приоритетные документы
+        for priority_type in priority_types:
+            for d in docs:
+                if d.metadata.get("type") == priority_type:
+                    pieces.append(f"---\n{d.page_content}\n")
+                    if sum(len(p) for p in pieces) > max_chars:
+                        break
             if sum(len(p) for p in pieces) > max_chars:
                 break
+        
+        # Затем добавляем чанки, если есть место
+        if sum(len(p) for p in pieces) < max_chars * 0.8:  # Если использовано меньше 80%
+            for d in docs:
+                doc_type = d.metadata.get("type", "")
+                if doc_type.endswith("-chunk") and doc_type not in [p.split("\n")[1] for p in pieces]:
+                    pieces.append(f"---\n{d.page_content}\n")
+                    if sum(len(p) for p in pieces) > max_chars:
+                        break
         
         return self._trim_to_chars("\n".join(pieces), max_chars)
     
