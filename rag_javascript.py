@@ -801,7 +801,7 @@ Evidence planning rules:
 - For questions about file structure or implementation, request the whole file with symbol "*"
 
 Respond ONLY with JSON array, no prose.
-Example: [{"file": "auth-context.js", "symbol": "*"}, {"file": "component.tsx", "symbol": "MyComponent"}, {"file": "config.webpack.js", "symbol": "*"}]"""),
+Example: [{{"file": "auth-context.js", "symbol": "*"}}, {{"file": "component.tsx", "symbol": "MyComponent"}}, {{"file": "config.webpack.js", "symbol": "*"}}]"""),
             ("human", "Question:\n{question}\n\nContext (map snippets):\n{context}\n")
         ])
 
