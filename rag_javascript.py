@@ -522,6 +522,24 @@ class JavaScriptFileParser(FileParser):
         
         return list(set(dependencies))
 
+    def _extract_regexes(self, content: str) -> List[str]:
+        """Извлекает регулярные выражения из содержимого файла"""
+        regexes = []
+        
+        # Паттерны для поиска регулярных выражений
+        regex_patterns = [
+            r'/(?:[^/\\]|\\.)*/[gimuy]*',  # /pattern/flags
+            r'new\s+RegExp\([^)]+\)',      # new RegExp(...)
+            r'RegExp\([^)]+\)',            # RegExp(...)
+        ]
+        
+        for pattern in regex_patterns:
+            matches = re.findall(pattern, content, re.MULTILINE)
+            regexes.extend(matches)
+        
+        # Убираем дубликаты и сортируем
+        return sorted(list(set(regexes)))
+
     def _find_function_end(self, content: str, start_pos: int) -> int:
         """Находит конец функции (приблизительно)"""
         # Простой поиск закрывающей скобки
@@ -966,7 +984,11 @@ SOURCE: {var.source or 'local'}"""
                         }
                     ))
         
-        print(f"✅ Создано {len(docs)} документов")
+        # Создаем документы о структуре проекта
+        structure_docs = self._create_project_structure_docs(js_maps)
+        docs.extend(structure_docs)
+        
+        print(f"✅ Создано {len(docs)} документов (включая {len(structure_docs)} документов структуры)")
         return docs
 
     def _get_file_priority(self, fm: JSFileMap) -> int:
