@@ -668,11 +668,12 @@ Given the user question about project architecture, propose up to {max_items} pr
 Each item must be an object with keys: file (relative path), symbol (specific element or "*" for entire file), and reason.
 
 IMPORTANT:
-- Paths must be repository-relative (e.g., `package.json`, `src/api/`)
+- Use simple filenames (e.g., `docker-compose.yml`, `package.json`, `requirements.txt`) - the system will find them automatically
 - For architectural questions, focus on config files, Docker files, and directory structure
 - For dependency questions, examine package.json, requirements.txt, docker-compose files
 - For pattern questions, look at directory structure and file organization
 - Use "*" as symbol to examine entire files when needed
+- If you see a file mentioned in the context, use its exact name from the context
 
 Respond ONLY with JSON array, no prose.
 """),
@@ -981,7 +982,13 @@ Reply in {answer_language}.
             target = os.path.join(root, rel)
             
             if not os.path.exists(target):
-                continue
+                # Если файл не найден по прямому пути, ищем по имени
+                found_target = self._find_file_by_name(root, rel)
+                if not found_target:
+                    continue
+                target = found_target
+                # Обновляем относительный путь для корректного отображения
+                rel = _relpath(target, root)
             
             try:
                 if sym == "*" or not sym:
@@ -1012,6 +1019,40 @@ Reply in {answer_language}.
         
         return out
     
+    def _find_file_by_name(self, root: str, filename: str) -> Optional[str]:
+        """Ищет файл по имени в проекте"""
+        try:
+            # Если это уже полный путь, возвращаем как есть
+            if os.path.isabs(filename):
+                return filename if os.path.exists(filename) else None
+            
+            # Сначала пробуем найти по точному пути
+            target = os.path.join(root, filename)
+            if os.path.exists(target):
+                return target
+            
+            # Ищем файл рекурсивно по имени
+            for root_dir, dirs, files in os.walk(root):
+                # Исключаем ненужные директории
+                dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'}]
+                
+                for file in files:
+                    if file == filename or file.lower() == filename.lower():
+                        return os.path.join(root_dir, file)
+            
+            # Если не найден точный файл, ищем похожие
+            filename_lower = filename.lower()
+            for root_dir, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'}]
+                
+                for file in files:
+                    if filename_lower in file.lower():
+                        return os.path.join(root_dir, file)
+            
+            return None
+        except Exception:
+            return None
+    
     def _get_directory_structure(self, dir_path: str, root: str) -> str:
         """Получает структуру директории"""
         try:
@@ -1035,9 +1076,30 @@ Reply in {answer_language}.
     def _gather_architecture_snippets(self, docs: List[Document], max_chars: int = 30000) -> str:
         """Собирает архитектурные фрагменты"""
         pieces = []
+        
+        # Сначала добавляем сводки (они более важны)
         for d in docs:
-            if d.metadata.get("type") in ("arch-map", "pattern-summary", "dependency-summary", "structure-summary"):
+            if d.metadata.get("type") in ("pattern-summary", "dependency-summary", "structure-summary"):
                 pieces.append(f"---\n{d.page_content}\n")
+        
+        # Затем добавляем карты файлов
+        for d in docs:
+            if d.metadata.get("type") == "arch-map":
+                # Добавляем информацию о файле в начало
+                source = d.metadata.get("source", "unknown")
+                file_type = d.metadata.get("file_type", "unknown")
+                is_config = d.metadata.get("is_config", False)
+                is_docker = d.metadata.get("is_docker", False)
+                
+                header = f"FILE: {source} (type: {file_type}"
+                if is_config:
+                    header += ", config"
+                if is_docker:
+                    header += ", docker"
+                header += ")\n"
+                
+                pieces.append(f"---\n{header}{d.page_content}\n")
+            
             if sum(len(p) for p in pieces) > max_chars:
                 break
         
