@@ -696,9 +696,8 @@ Reply in {answer_language}.
         docs = []
         universal_maps = [fm for fm in file_maps if isinstance(fm, UniversalFileMap)]
         
-        # Более консервативные ограничения для предотвращения проблем с памятью
-        MAX_DOCS = self.config.get('max_documents', 1000)  # Увеличено для лучшего покрытия
-        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 30)  # Увеличено
+        MAX_DOCS = self.config.get('max_documents', 10000)  # Увеличено для лучшего покрытия
+        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 100)  # Увеличено
         MAX_FILE_SIZE = self.config.get('max_file_size_kb', 1000)  # Увеличено
         
         print(f"📊 Создание документов: {len(universal_maps)} файлов")
