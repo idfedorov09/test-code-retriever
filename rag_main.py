@@ -233,8 +233,8 @@ def main():
     
     tools = {
         "Python RAG": python_tool,
-        "Universal RAG": universal_tool,
-        "Auto RAG": auto_tool
+        # "Universal RAG": universal_tool,
+        # "Auto RAG": auto_tool
     }
     
     for question in test_questions:
