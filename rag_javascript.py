@@ -122,6 +122,7 @@ class JSFileMap(BaseFileMap):
     classes: List[JSClassSig]
     variables: List[JSVariableSig]
     dependencies: List[str] = field(default_factory=list)
+    regexes: List[str] = field(default_factory=list)  # Regular expressions found
 
     def to_text(self) -> str:
         parts = [f"FILE: {self.path}"]
@@ -271,6 +272,9 @@ class JavaScriptFileParser(FileParser):
             
             # Анализируем вызовы функций
             self._analyze_function_calls(functions, content)
+            
+            # Анализируем регулярные выражения
+            regexes = self._extract_regexes(content)
 
             return JSFileMap(
                 path=_relpath(file_path, root),
@@ -281,7 +285,8 @@ class JavaScriptFileParser(FileParser):
                 functions=functions,
                 classes=classes,
                 variables=variables,
-                dependencies=dependencies
+                dependencies=dependencies,
+                regexes=regexes
             )
             
         except Exception as e:
@@ -295,7 +300,8 @@ class JavaScriptFileParser(FileParser):
                 functions=[],
                 classes=[],
                 variables=[],
-                dependencies=[]
+                dependencies=[],
+                regexes=[]
             )
 
     def _extract_imports(self, content: str) -> List[str]:
@@ -799,6 +805,8 @@ Evidence planning rules:
 - For build questions, look for config files (webpack, babel, etc.)
 - For questions about specific files (like "auth-context.js"), always request the whole file with symbol "*"
 - For questions about file structure or implementation, request the whole file with symbol "*"
+- For questions about code patterns (regex, specific functions, algorithms), request the whole file with symbol "*"
+- For questions about "используются ли", "есть ли", "найти" - search through file contents with symbol "*"
 
 Respond ONLY with JSON array, no prose.
 Example: [{{"file": "auth-context.js", "symbol": "*"}}, {{"file": "component.tsx", "symbol": "MyComponent"}}, {{"file": "config.webpack.js", "symbol": "*"}}]"""),
@@ -819,6 +827,9 @@ Key areas to focus on:
 - Build configuration and tooling setup
 - Testing strategies and test coverage
 - Performance optimizations and best practices
+- Code patterns: regular expressions, specific algorithms, utility functions
+- File contents: search through actual source code for patterns and implementations
+- When asked about "используются ли", "есть ли", "найти" - analyze the provided file contents thoroughly
 
 Provide detailed, accurate answers with code examples when relevant.
 Reply in {answer_language}."""),
@@ -830,15 +841,66 @@ Reply in {answer_language}."""),
         docs = []
         js_maps = [fm for fm in file_maps if isinstance(fm, JSFileMap)]
         
+        # Ограничения для предотвращения проблем с памятью
+        MAX_DOCS = self.config.get('max_documents', 10000)
+        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 100)
+        MAX_FILE_SIZE_KB = self.config.get('max_file_size_kb', 1000)
+        MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_KB * 1024
+        
         print(f"📊 Создание документов: {len(js_maps)} JavaScript файлов")
+        print(f"⚙️  Ограничения: макс {MAX_DOCS} документов, {MAX_CHUNKS_PER_FILE} чанков/файл, макс {MAX_FILE_SIZE_KB}KB на файл")
+        
+        doc_count = 0
+        
+        # Сортируем файлы по приоритету
+        js_maps.sort(key=lambda fm: self._get_file_priority(fm))
         
         for fm in js_maps:
-            # Создаем документ для всего файла
+            if doc_count >= MAX_DOCS:
+                print(f"⚠️  Достигнут лимит документов ({MAX_DOCS}), пропускаем остальные файлы")
+                break
+            
+            # Проверяем размер файла
+            try:
+                from rag_base import _read_text
+                full_content = _read_text(fm.path)
+                file_size_bytes = len(full_content.encode('utf-8'))
+                file_size_kb = file_size_bytes / 1024
+                
+                if file_size_kb > MAX_FILE_SIZE_KB:
+                    print(f"⚠️  Файл слишком большой: {fm.path} ({file_size_kb:.1f}KB), обрезаем до {MAX_FILE_SIZE_KB}KB")
+                    # Берем первые N KB файла
+                    truncated_content = full_content[:MAX_FILE_SIZE_BYTES]
+                    full_content = truncated_content + "\n\n... [truncated - file too large]"
+            except Exception as e:
+                print(f"⚠️  Не удалось прочитать {fm.path}: {e}")
+                continue
+            
+            # Создаем документ для карты файла
             file_content = fm.to_text()
             docs.append(Document(
                 page_content=file_content,
                 metadata={"source": fm.path, "type": f"{fm.file_type}-map", "loc": fm.loc}
             ))
+            doc_count += 1
+            
+            # Создаем чанки из содержимого файла
+            chunks = self._create_file_chunks(fm, full_content, MAX_CHUNKS_PER_FILE)
+            
+            for chunk in chunks:
+                if doc_count >= MAX_DOCS:
+                    break
+                    
+                docs.append(Document(
+                    page_content=chunk,
+                    metadata={
+                        "source": fm.path, 
+                        "type": f"{fm.file_type}-chunk", 
+                        "loc": fm.loc,
+                        "is_chunk": True
+                    }
+                ))
+                doc_count += 1
             
             # Создаем документы для функций
             for func in fm.functions:
@@ -906,6 +968,177 @@ SOURCE: {var.source or 'local'}"""
         
         print(f"✅ Создано {len(docs)} документов")
         return docs
+
+    def _get_file_priority(self, fm: JSFileMap) -> int:
+        """Возвращает приоритет файла (меньше = важнее)"""
+        priority_map = {
+            'config': 1,      # Конфигурационные файлы
+            'package': 1,     # package.json
+            'test': 2,        # Тестовые файлы
+            'storybook': 2,   # Storybook файлы
+            'react': 3,       # React компоненты
+            'jsx': 3,
+            'tsx': 3,
+            'typescript': 4,  # TypeScript файлы
+            'javascript': 5,  # Обычные JS файлы
+            'vue': 4,         # Vue файлы
+            'svelte': 4,      # Svelte файлы
+            'node': 3,        # Node.js файлы
+            'express': 3,     # Express файлы
+        }
+        
+        return priority_map.get(fm.file_type, 6)
+
+    def _create_file_chunks(self, fm: JSFileMap, content: str, max_chunks: int) -> List[str]:
+        """Создает чанки из содержимого файла"""
+        chunks = []
+        lines = content.splitlines()
+        
+        if len(lines) <= 50:  # Маленькие файлы - один чанк
+            return [self._create_content_chunk(fm, content, "full", 1, len(lines))]
+        
+        # Разбиваем на чанки по функциям/классам
+        function_chunks = self._extract_function_chunks(fm, content)
+        class_chunks = self._extract_class_chunks(fm, content)
+        import_chunks = self._extract_import_chunks(fm, content)
+        
+        # Объединяем все чанки
+        all_chunks = function_chunks + class_chunks + import_chunks
+        
+        # Если чанков мало, создаем общие чанки
+        if len(all_chunks) < max_chunks // 2:
+            general_chunks = self._create_general_chunks(fm, content, max_chunks - len(all_chunks))
+            all_chunks.extend(general_chunks)
+        
+        # Выбираем наиболее важные чанки
+        selected_chunks = self._select_important_chunks(all_chunks, max_chunks)
+        
+        return selected_chunks
+
+    def _extract_function_chunks(self, fm: JSFileMap, content: str) -> List[str]:
+        """Извлекает чанки с функциями"""
+        chunks = []
+        lines = content.splitlines()
+        
+        for func in fm.functions:
+            if func.lineno <= len(lines):
+                # Находим конец функции
+                end_line = min(func.end_lineno, len(lines))
+                func_lines = lines[func.lineno-1:end_line]
+                func_content = '\n'.join(func_lines)
+                
+                chunk = self._create_content_chunk(
+                    fm, func_content, f"function-{func.name}", 
+                    func.lineno, end_line
+                )
+                chunks.append(chunk)
+        
+        return chunks
+
+    def _extract_class_chunks(self, fm: JSFileMap, content: str) -> List[str]:
+        """Извлекает чанки с классами"""
+        chunks = []
+        lines = content.splitlines()
+        
+        for cls in fm.classes:
+            if cls.lineno <= len(lines):
+                # Находим конец класса
+                end_line = min(cls.end_lineno, len(lines))
+                class_lines = lines[cls.lineno-1:end_line]
+                class_content = '\n'.join(class_lines)
+                
+                chunk = self._create_content_chunk(
+                    fm, class_content, f"class-{cls.name}", 
+                    cls.lineno, end_line
+                )
+                chunks.append(chunk)
+        
+        return chunks
+
+    def _extract_import_chunks(self, fm: JSFileMap, content: str) -> List[str]:
+        """Извлекает чанки с импортами"""
+        chunks = []
+        lines = content.splitlines()
+        
+        import_lines = []
+        for i, line in enumerate(lines, 1):
+            if line.strip().startswith(('import ', 'export ', 'require(')):
+                import_lines.append((i, line))
+        
+        if import_lines:
+            # Группируем импорты в один чанк
+            start_line = import_lines[0][0]
+            end_line = import_lines[-1][0]
+            import_content = '\n'.join([line for _, line in import_lines])
+            
+            chunk = self._create_content_chunk(
+                fm, import_content, "imports", start_line, end_line
+            )
+            chunks.append(chunk)
+        
+        return chunks
+
+    def _create_general_chunks(self, fm: JSFileMap, content: str, max_chunks: int) -> List[str]:
+        """Создает общие чанки из содержимого файла"""
+        chunks = []
+        lines = content.splitlines()
+        
+        if len(lines) <= 100:
+            # Файл небольшой - один чанк
+            return [self._create_content_chunk(fm, content, "general", 1, len(lines))]
+        
+        # Разбиваем на равные части
+        chunk_size = len(lines) // max_chunks
+        for i in range(0, len(lines), chunk_size):
+            end_i = min(i + chunk_size, len(lines))
+            chunk_lines = lines[i:end_i]
+            chunk_content = '\n'.join(chunk_lines)
+            
+            chunk = self._create_content_chunk(
+                fm, chunk_content, f"general-{i//chunk_size + 1}", 
+                i + 1, end_i
+            )
+            chunks.append(chunk)
+        
+        return chunks
+
+    def _create_content_chunk(self, fm: JSFileMap, content: str, chunk_type: str, start_line: int, end_line: int) -> str:
+        """Создает чанк с содержимым"""
+        return f"""FILE CONTENT: {fm.path}
+TYPE: {fm.file_type}
+CHUNK: {chunk_type} (lines {start_line}-{end_line})
+SIZE: {len(content)} characters
+
+CONTENT:
+```javascript
+{content}
+```
+
+This chunk contains {chunk_type} from the file for detailed analysis."""
+
+    def _select_important_chunks(self, chunks: List[str], max_chunks: int) -> List[str]:
+        """Выбирает наиболее важные чанки"""
+        if len(chunks) <= max_chunks:
+            return chunks
+        
+        # Приоритет по типу чанка
+        priority_order = {
+            'imports': 5,        # Импорты очень важны
+            'function-': 4,      # Функции важны
+            'class-': 3,         # Классы важны
+            'general-': 1,       # Общие чанки менее важны
+            'full': 2           # Полный файл средний приоритет
+        }
+        
+        # Сортируем по приоритету
+        def get_priority(chunk: str) -> int:
+            for prefix, priority in priority_order.items():
+                if prefix in chunk:
+                    return priority
+            return 0
+        
+        sorted_chunks = sorted(chunks, key=get_priority, reverse=True)
+        return sorted_chunks[:max_chunks]
 
     def _extract_bodies(self, requests: List[Dict[str, str]], project_path: str) -> List[Tuple[str, str]]:
         """Извлекает тела функций/классов по запросам"""
