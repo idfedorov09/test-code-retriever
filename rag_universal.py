@@ -655,9 +655,6 @@ IMPORTANT:
 - For questions about specific files (like "package.json", "Dockerfile"), always request the whole file with symbol "*"
 - For questions about file statistics (lines, size), always request the whole file with symbol "*"
 - For questions about dependencies in JSON files, request both the whole file and specific chunks like "dependencies"
-- For questions about specific line ranges (e.g., "lines 100-200", "строки 100-200"), use the line range as symbol (e.g., "100-200")
-- For questions about specific line numbers (e.g., "line 11799-11833"), use the line range as symbol (e.g., "11799-11833")
-- For questions about "what's in lines X-Y of file Z", use the line range as symbol (e.g., "11799-11833")
 - Include both specific chunks and whole files for complete analysis
 
 Respond ONLY with JSON array, no prose.
@@ -1129,38 +1126,15 @@ This is a large file with {fm.loc} lines. Use specific queries to get detailed i
                     content = src
                 out.append((f"{rel_for_output}:1", content))
             else:
-                # Проверяем, не запрашивается ли диапазон строк
-                line_range = self._extract_line_range_from_symbol(sym)
-                if line_range:
-                    start_line, end_line = line_range
-                    if start_line <= line_count and end_line <= line_count:
-                        # Извлекаем запрашиваемые строки
-                        lines = src.splitlines()
-                        requested_lines = lines[start_line-1:end_line]
-                        
-                        # Создаем результат с номерами строк
-                        result = f"# Строки {start_line}-{end_line} из {rel_for_output}\n\n"
-                        result += "```\n"
-                        for i, line in enumerate(requested_lines, start_line):
-                            result += f"{i:4d}: {line}\n"
-                        result += "```\n"
-                        
-                        out.append((f"{rel_for_output}:{start_line}-{end_line}", result))
-                    else:
-                        # Строки не найдены
-                        out.append((f"{rel_for_output}:{start_line}-{end_line}", 
-                                  f"# Строки {start_line}-{end_line} не найдены в файле {rel_for_output}\n"
-                                  f"Файл содержит {line_count} строк"))
+                # Ищем конкретный чанк или символ
+                found = self._find_symbol_in_file(src, sym, rel_for_output)
+                if found:
+                    out.append(found)
                 else:
-                    # Ищем конкретный чанк или символ
-                    found = self._find_symbol_in_file(src, sym, rel_for_output)
-                    if found:
-                        out.append(found)
-                    else:
-                        # Fallback: возвращаем начало файла с указанием что символ не найден
-                        content = f"# Symbol '{sym}' not found in file, showing full content:\n\n"
-                        content += src[:3000] + "...[truncated]" if len(src) > 3000 else src
-                        out.append((f"{rel_for_output}:1", content))
+                    # Fallback: возвращаем начало файла с указанием что символ не найден
+                    content = f"# Symbol '{sym}' not found in file, showing full content:\n\n"
+                    content += src[:3000] + "...[truncated]" if len(src) > 3000 else src
+                    out.append((f"{rel_for_output}:1", content))
 
         return out
     
@@ -1410,28 +1384,6 @@ This is a large file with {fm.loc} lines. Use specific queries to get detailed i
         
         return result
     
-    def _extract_line_range_from_symbol(self, symbol: str) -> Optional[Tuple[int, int]]:
-        """Извлекает диапазон строк из символа"""
-        import re
-        
-        # Ищем паттерны типа "11799-11833" или "11799:11833"
-        patterns = [
-            r'(\d+)-(\d+)',  # 11799-11833
-            r'(\d+):(\d+)',  # 11799:11833
-            r'строк[иа]?\s+(\d+)-(\d+)',  # строки 11799-11833
-            r'строк[иа]?\s+(\d+):(\d+)',  # строки 11799:11833
-            r'line[s]?\s+(\d+)-(\d+)',  # lines 11799-11833
-            r'line[s]?\s+(\d+):(\d+)',  # lines 11799:11833
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, symbol, re.IGNORECASE)
-            if match:
-                start_line = int(match.group(1))
-                end_line = int(match.group(2))
-                return (start_line, end_line)
-        
-        return None
     
     def _find_symbol_in_file(self, content: str, symbol: str, file_path: str) -> Optional[Tuple[str, str]]:
         """Ищет символ в файле и возвращает соответствующий фрагмент"""
