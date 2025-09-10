@@ -1,15 +1,19 @@
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y \
     software-properties-common \
     curl \
     build-essential \
     gcc \
     g++ \
+    tzdata \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y python3.11 python3.11-dev python3.11-distutils \
     && rm -rf /var/lib/apt/lists/*
+
 
 RUN curl https://bootstrap.pypa.io/get-pip.py | python3.11
 
