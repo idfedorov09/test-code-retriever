@@ -22,3 +22,5 @@ dotenv~=0.9.9
 
 # Web interface
 flask~=3.0.0
+
+PyYAML~=6.0.2

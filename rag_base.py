@@ -249,7 +249,7 @@ class RAGSystemFactory:
         detected_types = cls.detect_project_types(project_path)
         
         # Приоритет выбора основного типа
-        priority_order = ['python', 'javascript', 'react', 'docker', 'universal']
+        priority_order = ['python', 'javascript', 'react', 'docker', 'architecture', 'universal']
         
         for preferred_type in priority_order:
             if preferred_type in detected_types:
@@ -329,6 +329,22 @@ class RAGSystemFactory:
             if any(ext in file_extensions for ext in ['cs', 'vb', 'fs']):
                 if any(f.endswith('.csproj') or f.endswith('.sln') for f in special_files):
                     detected_types.append('dotnet')
+            
+            # Архитектурный анализ - для проектов с множественными технологиями
+            # или сложной структурой (Docker + код + конфиги)
+            architecture_indicators = 0
+            if any(f.startswith('dockerfile') for f in special_files) or 'dockerfile' in special_files:
+                architecture_indicators += 1
+            if any(f in special_files for f in ['docker-compose.yml', 'docker-compose.yaml']):
+                architecture_indicators += 1
+            if any(f in special_files for f in ['package.json', 'requirements.txt', 'pyproject.toml', 'go.mod', 'cargo.toml']):
+                architecture_indicators += 1
+            if any(f in special_files for f in ['makefile', 'cmake', 'cmakelists.txt']):
+                architecture_indicators += 1
+            
+            # Если есть 2+ архитектурных индикатора, добавляем архитектурный тип
+            if architecture_indicators >= 2:
+                detected_types.append('architecture')
             
             # Всегда добавляем универсальный тип если есть текстовые файлы
             if file_extensions:

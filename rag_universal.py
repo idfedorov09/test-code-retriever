@@ -605,8 +605,8 @@ class UniversalRAGSystem(BaseRAGSystem):
         
         # Консервативная конфигурация по умолчанию для предотвращения проблем с памятью
         default_config = {
-            'max_documents': 1000,          # Максимум документов для индексации
-            'max_chunks_per_file': 30,      # Максимум чанков на файл
+            'max_documents': 10000,          # Максимум документов для индексации
+            'max_chunks_per_file': 100,      # Максимум чанков на файл
             'max_file_size_kb': 1000,        # Максимальный размер файла в KB
             'faiss_batch_size': 20,        # Размер батча для FAISS
             'bm25_k': 8,                   # Количество документов для BM25
