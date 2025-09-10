@@ -66,11 +66,23 @@ class ArchitectureFileMap(BaseFileMap):
         
         if self.is_config:
             parts.append("CONFIG:")
-            for key, value in self.config_data.items():
-                if isinstance(value, (dict, list)):
-                    parts.append(f"  {key}: {json.dumps(value, indent=2)[:200]}...")
-                else:
-                    parts.append(f"  {key}: {str(value)[:100]}")
+            if isinstance(self.config_data, dict):
+                for key, value in self.config_data.items():
+                    if isinstance(value, (dict, list)):
+                        parts.append(f"  {key}: {json.dumps(value, indent=2)[:200]}...")
+                    else:
+                        parts.append(f"  {key}: {str(value)[:100]}")
+            elif isinstance(self.config_data, list):
+                parts.append(f"  List with {len(self.config_data)} items")
+                for i, item in enumerate(self.config_data[:10]):  # Показываем только первые 10 элементов
+                    if isinstance(item, (dict, list)):
+                        parts.append(f"  [{i}]: {json.dumps(item, indent=2)[:150]}...")
+                    else:
+                        parts.append(f"  [{i}]: {str(item)[:100]}")
+                if len(self.config_data) > 5:
+                    parts.append(f"  ... and {len(self.config_data) - 5} more items")
+            else:
+                parts.append(f"  {str(self.config_data)[:200]}")
         
         if self.elements:
             parts.append("ELEMENTS:")
