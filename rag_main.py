@@ -200,11 +200,11 @@ def main():
     
     # Создаем универсальный RAG инструмент
     print("\n" + "="*60)
-    # universal_tool = create_rag_tool(
-    #     project_path=project_path,
-    #     rag_type="universal",
-    #     use_gpu=True
-    # )
+    universal_tool = create_rag_tool(
+        project_path=project_path,
+        rag_type="universal",
+        use_gpu=True
+    )
     
     # Очистка памяти между созданиями инструментов
     if GPU_UTILS_AVAILABLE:
@@ -214,11 +214,11 @@ def main():
     
     # Создаем автоматический RAG инструмент
     print("\n" + "="*60)
-    # auto_tool = create_rag_tool(
-    #     project_path=project_path,
-    #     rag_type="auto",
-    #     use_gpu=True
-    # )
+    auto_tool = create_rag_tool(
+        project_path=project_path,
+        rag_type="auto",
+        use_gpu=True
+    )
     
     # Тестовые запросы
     print("\n" + "="*60)
@@ -233,8 +233,8 @@ def main():
     
     tools = {
         "Python RAG": python_tool,
-        # "Universal RAG": universal_tool,
-        # "Auto RAG": auto_tool
+        "Universal RAG": universal_tool,
+        "Auto RAG": auto_tool
     }
     
     for question in test_questions:
