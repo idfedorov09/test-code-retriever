@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 from pathlib import Path
@@ -79,7 +80,7 @@ class UniversalFileMap(BaseFileMap):
 # Универсальные парсеры
 # -----------------------------------------------------------------------------
 
-class UniversalFileParser:
+class UniversalFileParser(FileParser):
     """Универсальный парсер для текстовых файлов"""
     
     # Паттерны для разных типов файлов
@@ -475,15 +476,18 @@ class UniversalRAGSystem(BaseRAGSystem):
         
         # Консервативная конфигурация по умолчанию для предотвращения проблем с памятью
         default_config = {
-            'max_documents': 500,          # Максимум документов для индексации
-            'max_chunks_per_file': 5,      # Максимум чанков на файл
-            'max_file_size_kb': 50,        # Максимальный размер файла в KB
-            'faiss_batch_size': 25,        # Размер батча для FAISS
+            'max_documents': 200,          # Максимум документов для индексации
+            'max_chunks_per_file': 3,      # Максимум чанков на файл
+            'max_file_size_kb': 25,        # Максимальный размер файла в KB
+            'faiss_batch_size': 20,        # Размер батча для FAISS
             'bm25_k': 8,                   # Количество документов для BM25
             'dense_k': 8,                  # Количество документов для dense retrieval
             'ensemble_weights': (0.6, 0.4), # BM25 приоритетнее
-            'map_char_budget': 16000,      # Бюджет символов для контекста
-            'answer_language': 'ru'
+            'map_char_budget': 20000,      # Бюджет символов для контекста
+            'evidence_char_budget': 15000, # Бюджет для evidence
+            'max_evidence_items': 6,       # Максимум evidence items
+            'answer_language': 'ru',
+            'use_compression': False       # Отключаем компрессию для универсального RAG
         }
         
         # Объединяем с пользовательской конфигурацией
@@ -499,8 +503,9 @@ class UniversalRAGSystem(BaseRAGSystem):
     def get_file_patterns(self) -> Dict[str, str]:
         return {"all": "**/*"}  # Все файлы
     
-    def get_evidence_prompt_template(self) -> str:
-        return """
+    def get_evidence_prompt_template(self) -> ChatPromptTemplate:
+        return ChatPromptTemplate.from_messages([
+("system", """
 You are a code reviewer analyzing a multi-language project. You will see a compact map of the repository with different file types and their contents.
 
 The map shows:
@@ -521,10 +526,13 @@ IMPORTANT:
 - Include both specific chunks and whole files for complete analysis
 
 Respond ONLY with JSON array, no prose.
-"""
+"""),
+    ("human", "Question:\n{question}\n\nContext (map snippets):\n{context}\n")
+])
     
-    def get_answer_prompt_template(self) -> str:
-        return """
+    def get_answer_prompt_template(self) -> ChatPromptTemplate:
+        return ChatPromptTemplate.from_messages([
+    ("system", """
 You are a senior software architect analyzing a multi-technology project for code review. Using the provided repository map and evidence, answer the question comprehensively.
 
 The repository includes files of different types:
@@ -545,24 +553,26 @@ Provide specific file:line references from the evidence and explain relationship
 Be precise, cite concrete references as `file:line`, and provide actionable insights. 
 Consider the multi-technology nature of the project in your analysis.
 Reply in {answer_language}.
-"""
+"""),
+    ("human", "Question:\n{question}\n\nRepo map (summaries):\n{map_text}\n\nEvidence (code bodies):\n{evidence_text}\n")
+])
     
     def _create_documents(self, file_maps: List[BaseFileMap]) -> List[Document]:
         docs = []
         universal_maps = [fm for fm in file_maps if isinstance(fm, UniversalFileMap)]
         
-        # Ограничения для предотвращения проблем с памятью
-        MAX_DOCS = self.config.get('max_documents', 1000)
-        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 10)
-        MAX_FILE_SIZE = self.config.get('max_file_size_kb', 100)  # KB
+        # Более консервативные ограничения для предотвращения проблем с памятью
+        MAX_DOCS = self.config.get('max_documents', 200)  # Уменьшено с 500
+        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 3)  # Уменьшено с 5
+        MAX_FILE_SIZE = self.config.get('max_file_size_kb', 25)  # Уменьшено с 50KB
         
         print(f"📊 Создание документов: {len(universal_maps)} файлов")
-        print(f"⚙️  Ограничения: макс {MAX_DOCS} документов, {MAX_CHUNKS_PER_FILE} чанков/файл")
+        print(f"⚙️  Ограничения: макс {MAX_DOCS} документов, {MAX_CHUNKS_PER_FILE} чанков/файл, макс {MAX_FILE_SIZE}KB на файл")
         
         doc_count = 0
         
-        # Сортируем файлы по размеру (сначала маленькие)
-        universal_maps.sort(key=lambda fm: fm.loc)
+        # Сортируем файлы по приоритету и размеру
+        universal_maps.sort(key=lambda fm: (self._get_file_priority(fm), fm.loc))
         
         # Create documents from file maps
         for fm in universal_maps:
@@ -576,62 +586,100 @@ Reply in {answer_language}.
                 print(f"⚠️  Пропускаем большой файл: {fm.path} (~{file_size_kb:.1f}KB)")
                 continue
             
-            # Создаем документ для всего файла (только для небольших файлов)
-            if fm.loc < 200:  # Только файлы меньше 200 строк
+            # Пропускаем файлы с малым количеством полезного контента
+            if not fm.chunks and fm.loc < 10:
+                continue
+            
+            # Создаем документ для всего файла только для очень маленьких и важных файлов
+            if fm.loc < 50 and self._is_important_file(fm):  # Только очень маленькие файлы
                 file_content = fm.to_text()
-                docs.append(Document(
-                    page_content=file_content,
-                    metadata={"source": fm.path, "type": f"{fm.file_type}-map", "loc": fm.loc}
-                ))
-                doc_count += 1
+                if len(file_content) < 2000:  # Дополнительная проверка размера
+                    docs.append(Document(
+                        page_content=file_content,
+                        metadata={"source": fm.path, "type": f"{fm.file_type}-map", "loc": fm.loc}
+                    ))
+                    doc_count += 1
             
             # Создаем документы для ключевых чанков (ограниченное количество)
-            context_prompt = UniversalFileParser.CONTEXT_PROMPTS.get(fm.file_type, "")
-            
-            # Выбираем наиболее важные чанки
-            important_chunks = self._select_important_chunks(fm.chunks, MAX_CHUNKS_PER_FILE)
-            
-            for chunk in important_chunks:
-                if doc_count >= MAX_DOCS:
-                    break
+            if fm.chunks:
+                context_prompt = UniversalFileParser.CONTEXT_PROMPTS.get(fm.file_type, "")
+                
+                # Выбираем наиболее важные чанки
+                important_chunks = self._select_important_chunks(fm.chunks, MAX_CHUNKS_PER_FILE)
+                
+                for chunk in important_chunks:
+                    if doc_count >= MAX_DOCS:
+                        break
                     
-                chunk_content = f"""FILE: {fm.path} (type: {fm.file_type})
+                    # Ограничиваем размер контента чанка
+                    chunk_content = chunk.content
+                    if len(chunk_content) > 1500:  # Обрезаем слишком длинные чанки
+                        chunk_content = chunk_content[:1500] + "...[truncated]"
+                    
+                    doc_content = f"""FILE: {fm.path} (type: {fm.file_type})
 CONTEXT: {context_prompt}
 CHUNK: {chunk.name} ({chunk.chunk_type})
 
-{chunk.content}
+{chunk_content}
 
-KEYWORDS: {', '.join(chunk.keywords[:5])}"""  # Ограничиваем количество ключевых слов
-                
-                docs.append(Document(
-                    page_content=chunk_content,
-                    metadata={
-                        "source": fm.path,
-                        "type": f"{fm.file_type}-chunk",
-                        "chunk_name": chunk.name,
-                        "chunk_type": chunk.chunk_type
-                    }
-                ))
-                doc_count += 1
+KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограничиваем ключевые слова
+                    
+                    docs.append(Document(
+                        page_content=doc_content,
+                        metadata={
+                            "source": fm.path,
+                            "type": f"{fm.file_type}-chunk",
+                            "chunk_name": chunk.name,
+                            "chunk_type": chunk.chunk_type
+                        }
+                    ))
+                    doc_count += 1
         
-        # Создаем сводный документ по типам файлов
-        file_types_summary = ["PROJECT FILE TYPES SUMMARY:"]
-        type_counts = {}
-        for fm in universal_maps:
-            type_counts[fm.file_type] = type_counts.get(fm.file_type, 0) + 1
-        
-        for file_type, count in sorted(type_counts.items()):
-            context = UniversalFileParser.CONTEXT_PROMPTS.get(file_type, "")
-            file_types_summary.append(f"  {file_type}: {count} files - {context}")
-        
-        docs.append(Document(
-            page_content="\n".join(file_types_summary),
-            metadata={"source": "__file_types__", "type": "project-summary"}
-        ))
-        doc_count += 1
+        # Создаем компактный сводный документ по типам файлов
+        if universal_maps:
+            file_types_summary = ["PROJECT OVERVIEW:"]
+            type_counts = {}
+            for fm in universal_maps:
+                type_counts[fm.file_type] = type_counts.get(fm.file_type, 0) + 1
+            
+            # Ограничиваем количество типов в сводке
+            for file_type, count in sorted(type_counts.items())[:10]:  # Только первые 10 типов
+                context = UniversalFileParser.CONTEXT_PROMPTS.get(file_type, "")[:50]  # Обрезаем описание
+                file_types_summary.append(f"  {file_type}: {count} files - {context}")
+            
+            docs.append(Document(
+                page_content="\n".join(file_types_summary),
+                metadata={"source": "__overview__", "type": "project-summary"}
+            ))
+            doc_count += 1
         
         print(f"✅ Создано {doc_count} документов (из {len(universal_maps)} файлов)")
         return docs
+    
+    def _get_file_priority(self, fm: UniversalFileMap) -> int:
+        """Возвращает приоритет файла (меньше = важнее)"""
+        # Важные типы файлов получают высокий приоритет
+        priority_map = {
+            'python': 1,
+            'javascript': 1, 'typescript': 1, 'react': 1,
+            'dockerfile': 2,
+            'yaml': 2, 'json': 2,
+            'sql': 3,
+            'markdown': 4,
+            'text': 5
+        }
+        return priority_map.get(fm.file_type, 6)
+    
+    def _is_important_file(self, fm: UniversalFileMap) -> bool:
+        """Проверяет, является ли файл важным для индексации"""
+        important_types = {'python', 'javascript', 'typescript', 'react', 'dockerfile', 'yaml', 'json'}
+        important_names = {'readme', 'config', 'settings', 'requirements', 'package'}
+        
+        if fm.file_type in important_types:
+            return True
+        
+        filename = fm.path.lower()
+        return any(name in filename for name in important_names)
     
     def _select_important_chunks(self, chunks: List[UniversalCodeChunk], max_chunks: int) -> List[UniversalCodeChunk]:
         """Выбирает наиболее важные чанки для индексации"""
@@ -772,27 +820,124 @@ KEYWORDS: {', '.join(chunk.keywords[:5])}"""  # Ограничиваем кол�
     
     def _answer_question(self, question: str, index: ProjectIndex) -> str:
         # Retrieve relevant documents
+        evidence_char_budget = self.config.get('evidence_char_budget', 15000)  # Уменьшено для универсального RAG
+        max_evidence_items = self.config.get('max_evidence_items', 6)  # Уменьшено
+        map_char_budget = self.config.get('map_char_budget', 20000)  # Уменьшено
+
         retrieved = index.retriever.invoke(question)
         
-        # Gather context (упрощенная версия)
-        pieces = []
-        for d in retrieved[:10]:  # Берем первые 10 документов
-            pieces.append(f"---\n{d.page_content}\n")
+        # Gather context
+        map_text = self._gather_map_snippets(retrieved, map_char_budget)
         
-        map_text = "\n".join(pieces)[:self.config.get('map_char_budget', 24000)]
+        # Generate evidence plan
+        evidence_prompt = self.get_evidence_prompt_template()
+        evidence_chain = evidence_prompt | self.llm | StrOutputParser()
+
+        raw_plan = evidence_chain.invoke({
+            "question": question,
+            "context": map_text,
+            "max_items": max_evidence_items,
+        })
         
-        # Generate answer directly (упрощенная версия без evidence planning)
-        answer_prompt = ChatPromptTemplate.from_template(self.get_answer_prompt_template())
+        plan_json = raw_plan.strip()
+        plan_json = plan_json[plan_json.find("[") : plan_json.rfind("]") + 1] if "[" in plan_json and "]" in plan_json else "[]"
+        try:
+            plan = json.loads(plan_json)
+            if not isinstance(plan, list):
+                plan = []
+        except Exception:
+            plan = []
+
+        # Fetch requested bodies
+        evidence_pairs = self._extract_bodies(index.root, plan[:max_evidence_items]) if plan else []
+        evidence_text = "\n\n".join([f"### {lbl}\n" + code for (lbl, code) in evidence_pairs])
+        evidence_text = self._trim_to_chars(evidence_text, evidence_char_budget)
+        
+        # Generate final answer
+        answer_prompt = self.get_answer_prompt_template()
         answer_chain = answer_prompt | self.llm | StrOutputParser()
         
         final = answer_chain.invoke({
             "question": question,
             "map_text": map_text,
             "answer_language": self.config.get('answer_language', 'ru'),
-            "evidence_text": "(using retrieved context)",
+            "evidence_text": evidence_text if evidence_text else "(no additional bodies requested)",
         })
         
         return final
+    
+    def _extract_bodies(self, root: str, requests: List[Dict[str, str]]) -> List[Tuple[str, str]]:
+        """Return list of (label, code_block) for requested {file,symbol}."""
+        out: List[Tuple[str, str]] = []
+        for req in requests:
+            rel = req.get("file", "")
+            sym = req.get("symbol", "")
+            target = os.path.join(root, rel)
+            if not os.path.isfile(target):
+                continue
+            
+            try:
+                src = _read_text(target)
+            except Exception:
+                continue
+
+            # Для универсального парсера упрощаем логику извлечения
+            if sym == "*":
+                # Возвращаем весь файл (с ограничением размера)
+                content = src[:3000] + "...[truncated]" if len(src) > 3000 else src
+                out.append((f"{rel}:1", content))
+            else:
+                # Ищем конкретный чанк или символ
+                found = self._find_symbol_in_file(src, sym, rel)
+                if found:
+                    out.append(found)
+                else:
+                    # Fallback: возвращаем начало файла
+                    content = src[:1500] + "...[truncated]" if len(src) > 1500 else src
+                    out.append((f"{rel}:1", content))
+
+        return out
+    
+    def _find_symbol_in_file(self, content: str, symbol: str, file_path: str) -> Optional[Tuple[str, str]]:
+        """Ищет символ в файле и возвращает соответствующий фрагмент"""
+        lines = content.splitlines()
+        
+        # Ищем по имени функции/класса/секции
+        for i, line in enumerate(lines):
+            if (symbol in line and 
+                any(keyword in line.lower() for keyword in ['def ', 'class ', 'function', 'const ', 'let ', 'var '])):
+                # Найдена строка с определением, извлекаем блок
+                start_line = i + 1
+                
+                # Пытаемся найти конец блока (простая эвристика)
+                end_line = min(i + 50, len(lines))  # Максимум 50 строк
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip() and not lines[j].startswith((' ', '\t')):
+                        end_line = j
+                        break
+                
+                block_content = '\n'.join(lines[i:end_line])
+                return (f"{file_path}:{start_line}", block_content)
+        
+        return None
+    
+    def _gather_map_snippets(self, docs: List[Document], max_chars: int = 20000) -> str:
+        pieces = []
+        for d in docs:
+            if d.metadata.get("type") in ("project-summary", "python-map", "javascript-map", "dockerfile-map", 
+                                        "yaml-map", "json-map", "text-map", "universal-chunk"):
+                pieces.append(f"---\n{d.page_content}\n")
+            if sum(len(p) for p in pieces) > max_chars:
+                break
+        
+        return self._trim_to_chars("\n".join(pieces), max_chars)
+    
+    def _trim_to_chars(self, text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        head = limit // 2
+        tail = limit - head
+        return text[:head] + "\n...\n" + text[-tail:]
     
     def _get_tool_description(self) -> str:
         return (
