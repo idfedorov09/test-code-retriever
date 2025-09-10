@@ -39,6 +39,7 @@ except ImportError:
 from rag_base import RAGSystemFactory
 from rag_python import PythonRAGSystem
 from rag_universal import UniversalRAGSystem
+from rag_javascript import JavaScriptRAGSystem
 
 # LangChain imports
 from langchain_community.llms import YandexGPT

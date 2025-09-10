@@ -300,6 +300,7 @@ HTML_TEMPLATE = """
                 <select id="rag_type" name="rag_type">
                     <option value="auto">🤖 Автоматический выбор</option>
                     <option value="python">🐍 Python (AST анализ)</option>
+                    <option value="javascript">JS</option>
                     <option value="universal">🌐 Универсальный (все файлы)</option>
                 </select>
             </div>
@@ -539,7 +540,7 @@ def init_tools():
         print(f"📊 Основной тип: {project_info['main_type']}")
         
         # Создаем инструменты для разных типов
-        available_types = ['python', 'universal', 'auto']
+        available_types = ['python', 'javascript', 'universal', 'auto']
         
         for rag_type in available_types:
             try:
