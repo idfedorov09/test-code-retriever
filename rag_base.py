@@ -10,10 +10,10 @@ import os
 import glob
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Any, Protocol
-from pathlib import Path
+from typing import List, Dict, Optional, Any, Protocol
 
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langchain_core.language_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
@@ -105,12 +105,12 @@ class BaseRAGSystem(ABC):
         pass
     
     @abstractmethod
-    def get_evidence_prompt_template(self) -> str:
+    def get_evidence_prompt_template(self) -> ChatPromptTemplate:
         """Возвращает шаблон промпта для поиска доказательств"""
         pass
     
     @abstractmethod
-    def get_answer_prompt_template(self) -> str:
+    def get_answer_prompt_template(self) -> ChatPromptTemplate:
         """Возвращает шаблон промпта для ответа"""
         pass
     

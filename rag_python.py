@@ -9,7 +9,9 @@ from __future__ import annotations
 import ast
 import os, json
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional
+
+import networkx as nx
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -109,9 +111,9 @@ class PythonFileMap(BaseFileMap):
 # Python парсер
 # -----------------------------------------------------------------------------
 
-class PythonFileParser:
+class PythonFileParser(FileParser):
     """Парсер Python файлов с использованием AST"""
-    
+
     def can_parse(self, file_path: str) -> bool:
         return file_path.endswith('.py')
     
@@ -209,7 +211,8 @@ class PythonFileParser:
                         pass
                 return out
 
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # type: ignore[override]
+            def visit_FunctionDef(self,
+                                  node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> None:  # type: ignore[override]
                 qn = ".".join(self.class_stack + [node.name]) if self.class_stack else node.name
                 fs = PythonFunctionSig(
                     name=node.name,
@@ -220,17 +223,17 @@ class PythonFileParser:
                     lineno=getattr(node, "lineno", 0),
                     end_lineno=getattr(node, "end_lineno", getattr(node, "lineno", 0)),
                 )
-                
+
                 # Set current function context to track calls
                 old_function = self.current_function
                 self.current_function = fs
-                
+
                 # Visit function body to collect calls
                 self.generic_visit(node)
-                
+
                 # Restore previous function context
                 self.current_function = old_function
-                
+
                 if self.class_stack:
                     classes[-1].methods.append(fs)
                 else:
@@ -246,11 +249,11 @@ class PythonFileParser:
                         bases.append(ast.unparse(b))
                     except Exception:
                         pass
-                
+
                 c = PythonClassSig(
-                    name=node.name, 
-                    bases=bases, 
-                    lineno=node.lineno, 
+                    name=node.name,
+                    bases=bases,
+                    lineno=node.lineno,
                     end_lineno=getattr(node, "end_lineno", node.lineno)
                 )
                 classes.append(c)
@@ -275,7 +278,7 @@ class PythonFileParser:
 # Анализаторы зависимостей
 # -----------------------------------------------------------------------------
 
-class PythonCallGraphAnalyzer:
+class PythonCallGraphAnalyzer(DependencyAnalyzer):
     """Анализатор графа вызовов Python функций"""
     
     def build_dependency_graph(self, file_maps: List[BaseFileMap]) -> None:
@@ -351,7 +354,7 @@ class PythonCallGraphAnalyzer:
                                     candidate.called_by.append(caller_name)
 
 
-class PythonInheritanceAnalyzer:
+class PythonInheritanceAnalyzer(DependencyAnalyzer):
     """Анализатор наследования Python классов"""
     
     def build_dependency_graph(self, file_maps: List[BaseFileMap]) -> None:
@@ -402,8 +405,9 @@ class PythonRAGSystem(BaseRAGSystem):
     def get_file_patterns(self) -> Dict[str, str]:
         return {"python": "**/*.py"}
     
-    def get_evidence_prompt_template(self) -> str:
-        return """
+    def get_evidence_prompt_template(self) -> ChatPromptTemplate:
+        return ChatPromptTemplate.from_messages([
+("system", """
 You are an architectural code reviewer analyzing Python code. You will see a compact map of a repository with function signatures, imports, classes, call relationships, and inheritance relationships.
 
 The map shows:
@@ -425,10 +429,13 @@ IMPORTANT:
 - Include both the target class/function and its relationships for complete analysis
 
 Respond ONLY with JSON array, no prose.
-"""
+"""),
+    ("human", "Question:\n{question}\n\nContext (map snippets):\n{context}\n")
+])
     
-    def get_answer_prompt_template(self) -> str:
-        return """
+    def get_answer_prompt_template(self) -> ChatPromptTemplate:
+        return ChatPromptTemplate.from_messages([
+    ("system", """
 You are a senior software architect analyzing Python code for code review. Using the provided repository map and evidence, answer the question comprehensively.
 
 The repository map includes:
@@ -450,9 +457,11 @@ Provide specific file:line references from the evidence and explain relationship
 Be precise, cite concrete references as `file:line`, and provide actionable insights. 
 If analyzing risks or issues, include specific remediation steps.
 Reply in {answer_language}.
-"""
+"""),
+    ("human", "Question:\n{question}\n\nRepo map (summaries):\n{map_text}\n\nEvidence (code bodies):\n{evidence_text}\n")
+])
     
-    def _create_documents(self, file_maps: List[BaseFileMap]) -> List[Document]:
+    def _create_documents(self, file_maps: List[PythonFileMap]) -> List[Document]:
         docs = []
         python_maps = [fm for fm in file_maps if isinstance(fm, PythonFileMap)]
         
@@ -494,6 +503,27 @@ Reply in {answer_language}.
                 page_content="\n".join(inheritance_lines), 
                 metadata={"source": "__inheritance_graph__", "type": "inheritance-graph-summary"}
             ))
+
+        if nx is not None:
+            G = nx.DiGraph()
+            for m in file_maps:
+                mod = m.path.replace(os.sep, ".").rstrip(".py")
+                G.add_node(mod, loc=m.loc)
+                for imp in m.imports:
+                    if imp and ("/" in imp or "." in imp):
+                        # attempt to map to local module name (best-effort)
+                        tgt = imp.replace("/", ".")
+                        G.add_edge(mod, tgt)
+            # Compute simple centrality to identify hotspots
+            try:
+                cent = nx.pagerank(G)
+            except Exception:
+                cent = {n: 0.0 for n in G.nodes}
+            # Serialize top hubs
+            hubs = sorted(cent.items(), key=lambda kv: kv[1], reverse=True)[:30]
+            lines = ["IMPORT GRAPH HUBS:"] + [f"  - {n} (score={s:.4f})" for n, s in hubs]
+            docs.append(
+                Document(page_content="\n".join(lines), metadata={"source": "__graph__", "type": "graph-summary"}))
         
         return docs
     
@@ -535,18 +565,20 @@ Reply in {answer_language}.
     
     def _answer_question(self, question: str, index: ProjectIndex) -> str:
         # Retrieve relevant documents
-        retrieved = index.retriever.invoke(question)
+        evidence_char_budget = self.config.get('evidence_char_budget', 20000)
+        max_evidence_items = self.config.get('max_evidence_items', 8)
+        map_char_budget = self.config.get('map_char_budget', 24000)
 
-        evidence_char_budget = 20000 # TODO: to tool call param
-        max_evidence_items = 8
+        retrieved = index.retriever.invoke(question)
         
         # Gather context
-        map_text = self._gather_map_snippets(retrieved, self.config.get('map_char_budget', 24000))
+        map_text = self._gather_map_snippets(retrieved, map_char_budget)
         
         # Generate evidence plan
-        evidence_prompt = ChatPromptTemplate.from_template(self.get_evidence_prompt_template())
+        evidence_prompt = self.get_evidence_prompt_template()
         evidence_chain = evidence_prompt | self.llm | StrOutputParser()
-        
+
+        # TODO: SO
         raw_plan = evidence_chain.invoke({
             "question": question,
             "context": map_text,
@@ -563,7 +595,7 @@ Reply in {answer_language}.
             plan = []
 
         # 2.5) Normalize planner paths to repo-relative
-        plan = self._normalize_plan_paths(plan, index.root, index.files) if plan else []
+        # plan = self._normalize_plan_paths(plan, index.root, index.files) if plan else []
 
         # 3) Fetch requested bodies
         evidence_pairs = self._extract_bodies(index.root, plan[:max_evidence_items]) if plan else []
@@ -571,7 +603,7 @@ Reply in {answer_language}.
         evidence_text = self._trim_to_chars(evidence_text, evidence_char_budget)
         
         # Generate final answer
-        answer_prompt = ChatPromptTemplate.from_template(self.get_answer_prompt_template())
+        answer_prompt = self.get_answer_prompt_template()
         answer_chain = answer_prompt | self.llm | StrOutputParser()
         
         final = answer_chain.invoke({
@@ -582,6 +614,71 @@ Reply in {answer_language}.
         })
         
         return final
+
+    def _extract_bodies(self, root: str, requests: List[Dict[str, str]]) -> List[Tuple[str, str]]:
+        """Return list of (label, code_block) for requested {file,symbol}."""
+        out: List[Tuple[str, str]] = []
+        for req in requests:
+            rel = req.get("file", "")
+            sym = req.get("symbol", "")
+            target = os.path.join(root, rel)
+            if not os.path.isfile(target):
+                continue
+            try:
+                src = _read_text(target)
+                tree = ast.parse(src)
+            except Exception:
+                continue
+
+            wanted_method: Optional[Tuple[str, Optional[str]]] = None
+            if "." in sym:
+                cls, meth = sym.split(".", 1)
+                wanted_method = (cls, meth)
+            else:
+                wanted_method = (None, sym)
+
+            found = False
+
+            class F(ast.NodeVisitor):
+                def visit_FunctionDef(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> None:  # type: ignore[override]
+                    nonlocal found
+                    if wanted_method and wanted_method[0] is None and node.name == wanted_method[1]:
+                        s, e = self._find_symbol_span(src, node)
+                        code = _safe_get_lines(src, s, e)
+                        out.append((f"{rel}:{s}", code))
+                        found = True
+                    self.generic_visit(node)
+
+                def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # type: ignore[override]
+                    self.visit_FunctionDef(node)  # same handling
+
+                def visit_ClassDef(self, node: ast.ClassDef) -> None:  # type: ignore[override]
+                    nonlocal found
+                    if wanted_method and wanted_method[0] == node.name:
+                        # scan methods
+                        for ch in node.body:
+                            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)) and ch.name == wanted_method[1]:
+                                s, e = self._find_symbol_span(src, ch)
+                                code = _safe_get_lines(src, s, e)
+                                out.append((f"{rel}:{s}", code))
+                                found = True
+                                break
+                    self.generic_visit(node)
+
+                def _find_symbol_span(self, source: str, node: ast.AST) -> Tuple[int, int]:
+                    start = getattr(node, "lineno", 1)
+                    end = getattr(node, "end_lineno", start)
+                    # expand decorators upward if present
+                    if hasattr(node, "decorator_list") and node.decorator_list:
+                        dec0 = node.decorator_list[0]
+                        start = min(start, getattr(dec0, "lineno", start))
+                    return start, end
+
+            F().visit(tree)
+            if not found and sym == "*":  # allow wildcard file fetch
+                out.append((f"{rel}:1", src))
+
+        return out
     
     def _normalize_plan_paths(self, plan: List[Dict[str, str]], root: str, known_rel_paths: List[str]) -> List[Dict[str, str]]:
         normalized: List[Dict[str, str]] = []
