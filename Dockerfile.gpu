@@ -1,0 +1,57 @@
+FROM nvidia/cuda:12.1-devel-ubuntu22.04
+
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    curl \
+    build-essential \
+    gcc \
+    g++ \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y python3.11 python3.11-dev python3.11-distutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl https://bootstrap.pypa.io/get-pip.py | python3.11
+
+RUN ln -s /usr/bin/python3.11 /usr/bin/python
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN echo "# GPU requirements" > requirements-gpu.txt && \
+    echo "langchain-core~=0.3.75" >> requirements-gpu.txt && \
+    echo "langchain-huggingface~=0.3.1" >> requirements-gpu.txt && \
+    echo "langchain-community~=0.3.29" >> requirements-gpu.txt && \
+    echo "langchain~=0.3.27" >> requirements-gpu.txt && \
+    echo "networkx~=3.5" >> requirements-gpu.txt && \
+    echo "pyan3~=1.2.0" >> requirements-gpu.txt && \
+    echo "sentence-transformers~=5.1.0" >> requirements-gpu.txt && \
+    echo "torch>=2.0.0+cu121 --index-url https://download.pytorch.org/whl/cu121" >> requirements-gpu.txt && \
+    echo "accelerate>=0.20.0" >> requirements-gpu.txt && \
+    echo "rank-bm25~=0.2.2" >> requirements-gpu.txt && \
+    echo "faiss-gpu-cu12==1.12.0" >> requirements-gpu.txt && \
+    echo "grpcio~=1.74.0" >> requirements-gpu.txt && \
+    echo "grpcio-tools~=1.74.0" >> requirements-gpu.txt && \
+    echo "yandexcloud~=0.280.0" >> requirements-gpu.txt && \
+    echo "dotenv~=0.9.9" >> requirements-gpu.txt && \
+    echo "flask~=3.0.0" >> requirements-gpu.txt
+
+RUN pip install --no-cache-dir -r requirements-gpu.txt
+
+COPY . .
+
+RUN mkdir -p /app/models /app/project
+
+ENV PYTHONPATH=/app
+ENV FLASK_ENV=production
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+CMD ["python", "web_ui.py"]

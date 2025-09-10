@@ -1,0 +1,45 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN echo "# CPU-only requirements" > requirements-cpu.txt && \
+    echo "langchain-core~=0.3.75" >> requirements-cpu.txt && \
+    echo "langchain-huggingface~=0.3.1" >> requirements-cpu.txt && \
+    echo "langchain-community~=0.3.29" >> requirements-cpu.txt && \
+    echo "langchain~=0.3.27" >> requirements-cpu.txt && \
+    echo "networkx~=3.5" >> requirements-cpu.txt && \
+    echo "pyan3~=1.2.0" >> requirements-cpu.txt && \
+    echo "sentence-transformers~=5.1.0" >> requirements-cpu.txt && \
+    echo "torch>=2.0.0+cpu --index-url https://download.pytorch.org/whl/cpu" >> requirements-cpu.txt && \
+    echo "accelerate>=0.20.0" >> requirements-cpu.txt && \
+    echo "rank-bm25~=0.2.2" >> requirements-cpu.txt && \
+    echo "faiss-cpu~=1.12.0" >> requirements-cpu.txt && \
+    echo "grpcio~=1.74.0" >> requirements-cpu.txt && \
+    echo "grpcio-tools~=1.74.0" >> requirements-cpu.txt && \
+    echo "yandexcloud~=0.280.0" >> requirements-cpu.txt && \
+    echo "dotenv~=0.9.9" >> requirements-cpu.txt && \
+    echo "flask~=3.0.0" >> requirements-cpu.txt
+
+RUN pip install --no-cache-dir -r requirements-cpu.txt
+
+COPY . .
+
+RUN mkdir -p /app/models /app/project
+
+ENV PYTHONPATH=/app
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+CMD ["python", "web_ui.py"]

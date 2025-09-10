@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  rag-web-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: rag-web-cpu
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - .:/app/project:ro
+      - ./models:/app/models:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - rag-network
+
+  # GPU версия
+  # rag-web-gpu:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.gpu
+  #   container_name: rag-web-gpu
+  #   ports:
+  #     - "5001:5000"
+  #   environment:
+  #     - TEST_PROJ_PATH=/app/project
+  #     - PYTHONPATH=/app
+  #     - FLASK_ENV=production
+  #     - CUDA_VISIBLE_DEVICES=0
+  #   volumes:
+  #     - .:/app/project:ro
+  #     - ./models:/app/models:ro
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 60s
+  #   networks:
+  #     - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
