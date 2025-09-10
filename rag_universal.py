@@ -340,15 +340,100 @@ class UniversalFileParser(FileParser):
     
     def _split_config_chunks(self, content: str) -> List[UniversalCodeChunk]:
         """Разбиение конфигурационных файлов"""
-        # Для YAML/JSON создаем один большой чанк с ключевыми словами
-        return [UniversalCodeChunk(
-            name="config",
-            content=content,
-            chunk_type="configuration",
-            lineno=1,
-            end_lineno=len(content.splitlines()),
-            keywords=self._extract_config_keywords(content)
-        )]
+        chunks = []
+        
+        try:
+            import json
+            data = json.loads(content)
+            
+            if isinstance(data, dict):
+                # Создаем отдельные чанки для разных секций
+                
+                # Основная информация
+                main_info = {}
+                for key in ['name', 'version', 'description', 'author', 'license']:
+                    if key in data:
+                        main_info[key] = data[key]
+                
+                if main_info:
+                    chunks.append(UniversalCodeChunk(
+                        name="main_info",
+                        content=json.dumps(main_info, indent=2),
+                        chunk_type="package_info",
+                        lineno=1,
+                        end_lineno=10,
+                        keywords=list(main_info.keys())
+                    ))
+                
+                # Dependencies
+                if 'dependencies' in data:
+                    deps = data['dependencies']
+                    chunks.append(UniversalCodeChunk(
+                        name="dependencies",
+                        content=json.dumps(deps, indent=2),
+                        chunk_type="dependencies",
+                        lineno=1,
+                        end_lineno=len(str(deps).splitlines()),
+                        keywords=list(deps.keys())[:20]  # Первые 20 зависимостей как ключевые слова
+                    ))
+                
+                # Dev Dependencies
+                if 'devDependencies' in data:
+                    dev_deps = data['devDependencies']
+                    chunks.append(UniversalCodeChunk(
+                        name="devDependencies",
+                        content=json.dumps(dev_deps, indent=2),
+                        chunk_type="dev_dependencies",
+                        lineno=1,
+                        end_lineno=len(str(dev_deps).splitlines()),
+                        keywords=list(dev_deps.keys())[:10]
+                    ))
+                
+                # Scripts
+                if 'scripts' in data:
+                    scripts = data['scripts']
+                    chunks.append(UniversalCodeChunk(
+                        name="scripts",
+                        content=json.dumps(scripts, indent=2),
+                        chunk_type="scripts",
+                        lineno=1,
+                        end_lineno=len(str(scripts).splitlines()),
+                        keywords=list(scripts.keys())
+                    ))
+                
+                # Если нет специальных секций, создаем общий чанк
+                if not chunks:
+                    chunks.append(UniversalCodeChunk(
+                        name="config",
+                        content=content,
+                        chunk_type="configuration",
+                        lineno=1,
+                        end_lineno=len(content.splitlines()),
+                        keywords=self._extract_config_keywords(content)
+                    ))
+            else:
+                # Не словарь - создаем обычный чанк
+                chunks.append(UniversalCodeChunk(
+                    name="config",
+                    content=content,
+                    chunk_type="configuration",
+                    lineno=1,
+                    end_lineno=len(content.splitlines()),
+                    keywords=self._extract_config_keywords(content)
+                ))
+                
+        except (json.JSONDecodeError, Exception):
+            # Если не JSON или ошибка парсинга - создаем обычный чанк
+            chunks.append(UniversalCodeChunk(
+                name="config",
+                content=content,
+                chunk_type="configuration",
+                lineno=1,
+                end_lineno=len(content.splitlines()),
+                keywords=self._extract_config_keywords(content)
+            ))
+        
+        return chunks
     
     def _split_sql_chunks(self, content: str) -> List[UniversalCodeChunk]:
         """Разбиение SQL файлов"""
@@ -440,9 +525,38 @@ class UniversalFileParser(FileParser):
         return list(set(keywords))
     
     def _extract_config_keywords(self, content: str) -> List[str]:
-        # Простое извлечение ключей из YAML/JSON
-        keywords = re.findall(r'(\w+):', content)
-        return list(set(keywords))
+        """Извлекает ключевые слова из конфигурационных файлов"""
+        keywords = []
+        
+        try:
+            import json
+            data = json.loads(content)
+            
+            if isinstance(data, dict):
+                # Извлекаем ключи верхнего уровня
+                keywords.extend(data.keys())
+                
+                # Специально для package.json/package-lock.json
+                if 'dependencies' in data and isinstance(data['dependencies'], dict):
+                    keywords.extend(list(data['dependencies'].keys())[:30])  # Первые 30 зависимостей
+                
+                if 'devDependencies' in data and isinstance(data['devDependencies'], dict):
+                    keywords.extend(list(data['devDependencies'].keys())[:15])  # Первые 15 dev зависимостей
+                
+                if 'scripts' in data and isinstance(data['scripts'], dict):
+                    keywords.extend(data['scripts'].keys())
+                
+                # Извлекаем важные значения
+                for key in ['name', 'version', 'description']:
+                    if key in data and isinstance(data[key], str):
+                        keywords.append(data[key])
+            
+        except (json.JSONDecodeError, Exception):
+            # Fallback: простое извлечение ключей из текста
+            keywords = re.findall(r'"(\w+)"\s*:', content)
+        
+        # Убираем дубликаты и ограничиваем количество
+        return list(set(keywords))[:50]
     
     def _extract_sql_keywords(self, content: str) -> List[str]:
         keywords = []
@@ -538,6 +652,9 @@ IMPORTANT:
 - Consider the file type when determining relevance
 - For configuration questions, focus on config files (YAML, JSON, ENV)
 - For architecture questions, look at multiple file types
+- For questions about specific files (like "package.json", "Dockerfile"), always request the whole file with symbol "*"
+- For questions about file statistics (lines, size), always request the whole file with symbol "*"
+- For questions about dependencies in JSON files, request both the whole file and specific chunks like "dependencies"
 - Include both specific chunks and whole files for complete analysis
 
 Respond ONLY with JSON array, no prose.
@@ -577,9 +694,9 @@ Reply in {answer_language}.
         universal_maps = [fm for fm in file_maps if isinstance(fm, UniversalFileMap)]
         
         # Более консервативные ограничения для предотвращения проблем с памятью
-        MAX_DOCS = self.config.get('max_documents', 200)  # Уменьшено с 500
-        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 3)  # Уменьшено с 5
-        MAX_FILE_SIZE = self.config.get('max_file_size_kb', 25)  # Уменьшено с 50KB
+        MAX_DOCS = self.config.get('max_documents', 300)  # Увеличено для лучшего покрытия
+        MAX_CHUNKS_PER_FILE = self.config.get('max_chunks_per_file', 5)  # Увеличено
+        MAX_FILE_SIZE = self.config.get('max_file_size_kb', 50)  # Увеличено
         
         print(f"📊 Создание документов: {len(universal_maps)} файлов")
         print(f"⚙️  Ограничения: макс {MAX_DOCS} документов, {MAX_CHUNKS_PER_FILE} чанков/файл, макс {MAX_FILE_SIZE}KB на файл")
@@ -606,16 +723,16 @@ Reply in {answer_language}.
                 continue
             
             # Создаем документ для всего файла только для очень маленьких и важных файлов
-            if fm.loc < 50 and self._is_important_file(fm):  # Только очень маленькие файлы
+            if fm.loc < 100 and self._is_important_file(fm):  # Увеличено до 100 строк
                 file_content = fm.to_text()
-                if len(file_content) < 2000:  # Дополнительная проверка размера
+                if len(file_content) < 3000:  # Увеличено до 3000 символов
                     docs.append(Document(
                         page_content=file_content,
                         metadata={"source": fm.path, "type": f"{fm.file_type}-map", "loc": fm.loc}
                     ))
                     doc_count += 1
             
-            # Создаем документы для ключевых чанков (ограниченное количество)
+            # Создаем документы для ключевых чанков
             if fm.chunks:
                 context_prompt = UniversalFileParser.CONTEXT_PROMPTS.get(fm.file_type, "")
                 
@@ -628,8 +745,8 @@ Reply in {answer_language}.
                     
                     # Ограничиваем размер контента чанка
                     chunk_content = chunk.content
-                    if len(chunk_content) > 1500:  # Обрезаем слишком длинные чанки
-                        chunk_content = chunk_content[:1500] + "...[truncated]"
+                    if len(chunk_content) > 2000:  # Увеличено до 2000 символов
+                        chunk_content = chunk_content[:2000] + "...[truncated]"
                     
                     doc_content = f"""FILE: {fm.path} (type: {fm.file_type})
 CONTEXT: {context_prompt}
@@ -637,7 +754,7 @@ CHUNK: {chunk.name} ({chunk.chunk_type})
 
 {chunk_content}
 
-KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограничиваем ключевые слова
+KEYWORDS: {', '.join(chunk.keywords[:5])}"""  # Увеличено до 5 ключевых слов
                     
                     docs.append(Document(
                         page_content=doc_content,
@@ -649,6 +766,26 @@ KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограни
                         }
                     ))
                     doc_count += 1
+            
+            # Для больших файлов создаем специальные документы с метаданными
+            if fm.loc > 50:  # Файлы больше 50 строк
+                file_stats = f"""FILE: {fm.path} (type: {fm.file_type})
+SIZE: {fm.loc} lines
+KEYWORDS: {', '.join(fm.keywords[:10])}
+DEPENDENCIES: {', '.join(fm.dependencies[:5])}
+
+This is a large file with {fm.loc} lines. Use specific queries to get detailed information about its contents."""
+                
+                docs.append(Document(
+                    page_content=file_stats,
+                    metadata={
+                        "source": fm.path,
+                        "type": f"{fm.file_type}-stats",
+                        "loc": fm.loc,
+                        "is_large_file": True
+                    }
+                ))
+                doc_count += 1
         
         # Создаем компактный сводный документ по типам файлов
         if universal_maps:
@@ -975,13 +1112,18 @@ KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограни
             try:
                 src = _read_text(target_path)
                 rel_for_output = os.path.relpath(target_path, root)
+                file_size = len(src)
+                line_count = len(src.splitlines())
             except Exception:
                 continue
 
-            # Для универсального парсера упрощаем логику извлечения
+            # Специальная обработка для разных типов файлов
             if sym == "*" or not sym:
-                # Возвращаем весь файл (с ограничением размера)
-                content = src[:4000] + "...[truncated]" if len(src) > 4000 else src
+                # Для больших файлов используем специальную логику
+                if file_size > 10000:  # Больше 10KB
+                    content = self._handle_large_file(src, rel_for_output, file_size, line_count)
+                else:
+                    content = src
                 out.append((f"{rel_for_output}:1", content))
             else:
                 # Ищем конкретный чанк или символ
@@ -995,6 +1137,253 @@ KEYWORDS: {', '.join(chunk.keywords[:3])}"""  # Еще больше ограни
                     out.append((f"{rel_for_output}:1", content))
 
         return out
+    
+    def _handle_large_file(self, content: str, file_path: str, file_size: int, line_count: int) -> str:
+        """Обрабатывает большие файлы с умным извлечением контента"""
+        file_ext = file_path.split('.')[-1].lower()
+        
+        # Статистика файла
+        stats = f"# Файл: {file_path}\n"
+        stats += f"# Размер: {file_size:,} байт\n"
+        stats += f"# Строк: {line_count:,}\n\n"
+        
+        # Универсальная обработка для всех типов файлов
+        result = stats
+        
+        # Анализируем структуру файла
+        lines = content.splitlines()
+        
+        # Показываем начало файла
+        result += "## 📄 Начало файла\n\n"
+        result += "```\n"
+        for i, line in enumerate(lines[:20], 1):
+            result += f"{i:4d}: {line}\n"
+        result += "```\n\n"
+        
+        # Анализируем содержимое в зависимости от типа
+        if file_ext == 'json':
+            result += self._analyze_json_structure(content)
+        elif file_ext in ['py', 'js', 'ts', 'jsx', 'tsx']:
+            result += self._analyze_code_structure(content, file_ext)
+        elif file_ext in ['md', 'txt', 'rst']:
+            result += self._analyze_text_structure(content)
+        elif file_ext in ['yaml', 'yml']:
+            result += self._analyze_yaml_structure(content)
+        elif file_ext in ['xml', 'html']:
+            result += self._analyze_xml_structure(content)
+        else:
+            result += self._analyze_generic_structure(content)
+        
+        # Показываем конец файла
+        if line_count > 40:
+            result += "## 📄 Конец файла\n\n"
+            result += "```\n"
+            for i, line in enumerate(lines[-10:], line_count - 9):
+                result += f"{i:4d}: {line}\n"
+            result += "```\n\n"
+        
+        # Добавляем полный контент (обрезанный)
+        result += "## 📄 Полный контент (первые 3000 символов)\n\n"
+        result += "```\n"
+        result += content[:3000]
+        if len(content) > 3000:
+            result += "\n... [truncated]"
+        result += "\n```\n"
+        
+        return result
+    
+    def _analyze_json_structure(self, content: str) -> str:
+        """Анализирует структуру JSON файла"""
+        try:
+            import json
+            data = json.loads(content)
+            
+            result = "## 📊 JSON Структура\n\n"
+            
+            if isinstance(data, dict):
+                result += f"**Корневые ключи:** {', '.join(data.keys())}\n\n"
+                
+                # Анализируем зависимости
+                if 'dependencies' in data:
+                    deps = data['dependencies']
+                    result += f"**Dependencies:** {len(deps)} пакетов\n"
+                    for name, version in list(deps.items())[:10]:
+                        result += f"- {name}: {version}\n"
+                    if len(deps) > 10:
+                        result += f"... и еще {len(deps) - 10} зависимостей\n"
+                    result += "\n"
+                
+                # Анализируем другие важные ключи
+                for key in ['name', 'version', 'description', 'scripts', 'engines']:
+                    if key in data:
+                        result += f"**{key.title()}:** {data[key]}\n"
+            else:
+                result += f"**Тип данных:** {type(data).__name__}\n"
+            
+            return result
+            
+        except json.JSONDecodeError:
+            return "## ❌ Ошибка парсинга JSON\n\n"
+        except Exception as e:
+            return f"## ❌ Ошибка анализа JSON: {e}\n\n"
+    
+    def _analyze_code_structure(self, content: str, file_ext: str) -> str:
+        """Анализирует структуру файла с кодом"""
+        lines = content.splitlines()
+        
+        result = f"## 📝 Анализ {file_ext.upper()} файла\n\n"
+        
+        # Считаем функции, классы, импорты
+        functions = []
+        classes = []
+        imports = []
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith(('def ', 'function ', 'const ', 'let ', 'var ')):
+                functions.append(f"Строка {i}: {stripped}")
+            elif stripped.startswith(('class ', 'interface ')):
+                classes.append(f"Строка {i}: {stripped}")
+            elif stripped.startswith(('import ', 'from ', 'require(')):
+                imports.append(f"Строка {i}: {stripped}")
+        
+        if functions:
+            result += f"**Функции ({len(functions)}):**\n"
+            for func in functions[:10]:
+                result += f"- {func}\n"
+            if len(functions) > 10:
+                result += f"... и еще {len(functions) - 10} функций\n"
+            result += "\n"
+        
+        if classes:
+            result += f"**Классы ({len(classes)}):**\n"
+            for cls in classes[:10]:
+                result += f"- {cls}\n"
+            if len(classes) > 10:
+                result += f"... и еще {len(classes) - 10} классов\n"
+            result += "\n"
+        
+        if imports:
+            result += f"**Импорты ({len(imports)}):**\n"
+            for imp in imports[:10]:
+                result += f"- {imp}\n"
+            if len(imports) > 10:
+                result += f"... и еще {len(imports) - 10} импортов\n"
+            result += "\n"
+        
+        return result
+    
+    def _analyze_text_structure(self, content: str) -> str:
+        """Анализирует структуру текстового файла"""
+        lines = content.splitlines()
+        
+        result = "## 📄 Анализ текстового файла\n\n"
+        
+        # Считаем заголовки, ссылки, списки
+        headers = []
+        links = []
+        lists = []
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                headers.append(f"Строка {i}: {stripped}")
+            elif 'http' in stripped or 'www.' in stripped:
+                links.append(f"Строка {i}: {stripped}")
+            elif stripped.startswith(('-', '*', '+', '1.', '2.', '3.')):
+                lists.append(f"Строка {i}: {stripped}")
+        
+        if headers:
+            result += f"**Заголовки ({len(headers)}):**\n"
+            for header in headers[:10]:
+                result += f"- {header}\n"
+            result += "\n"
+        
+        if links:
+            result += f"**Ссылки ({len(links)}):**\n"
+            for link in links[:5]:
+                result += f"- {link}\n"
+            result += "\n"
+        
+        if lists:
+            result += f"**Списки ({len(lists)}):**\n"
+            for item in lists[:5]:
+                result += f"- {item}\n"
+            result += "\n"
+        
+        return result
+    
+    def _analyze_yaml_structure(self, content: str) -> str:
+        """Анализирует структуру YAML файла"""
+        lines = content.splitlines()
+        
+        result = "## 📄 Анализ YAML файла\n\n"
+        
+        # Считаем секции (ключи верхнего уровня)
+        sections = []
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#') and not stripped.startswith('-') and ':' in stripped:
+                key = stripped.split(':')[0].strip()
+                if not key.startswith(' '):  # Только ключи верхнего уровня
+                    sections.append(f"Строка {i}: {key}")
+        
+        if sections:
+            result += f"**Секции ({len(sections)}):**\n"
+            for section in sections[:10]:
+                result += f"- {section}\n"
+            result += "\n"
+        
+        return result
+    
+    def _analyze_xml_structure(self, content: str) -> str:
+        """Анализирует структуру XML/HTML файла"""
+        lines = content.splitlines()
+        
+        result = "## 📄 Анализ XML/HTML файла\n\n"
+        
+        # Считаем теги
+        tags = []
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if '<' in stripped and '>' in stripped:
+                # Простое извлечение тегов
+                import re
+                found_tags = re.findall(r'<(\w+)', stripped)
+                for tag in found_tags:
+                    tags.append(f"Строка {i}: <{tag}>")
+        
+        if tags:
+            result += f"**Теги ({len(tags)}):**\n"
+            for tag in tags[:10]:
+                result += f"- {tag}\n"
+            result += "\n"
+        
+        return result
+    
+    def _analyze_generic_structure(self, content: str) -> str:
+        """Анализирует структуру обычного файла"""
+        lines = content.splitlines()
+        
+        result = "## 📄 Анализ файла\n\n"
+        
+        # Считаем непустые строки
+        non_empty = [i for i, line in enumerate(lines, 1) if line.strip()]
+        
+        result += f"**Статистика:**\n"
+        result += f"- Всего строк: {len(lines)}\n"
+        result += f"- Непустых строк: {len(non_empty)}\n"
+        result += f"- Пустых строк: {len(lines) - len(non_empty)}\n\n"
+        
+        # Показываем первые непустые строки
+        if non_empty:
+            result += f"**Первые непустые строки:**\n"
+            for i in non_empty[:10]:
+                result += f"Строка {i}: {lines[i-1].strip()}\n"
+            result += "\n"
+        
+        return result
+    
     
     def _find_symbol_in_file(self, content: str, symbol: str, file_path: str) -> Optional[Tuple[str, str]]:
         """Ищет символ в файле и возвращает соответствующий фрагмент"""
