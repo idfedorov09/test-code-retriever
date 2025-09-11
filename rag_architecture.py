@@ -705,7 +705,8 @@ For dependency questions:
 - Look at import statements and module relationships
 
 Provide specific file references and explain architectural decisions clearly.
-Be precise, cite concrete references as `file:line`, and provide actionable insights.
+Be precise, cite concrete references as `file:line` (use the exact line numbers shown in the evidence), and provide actionable insights.
+When referencing line numbers, use the exact numbers shown in the evidence snippets.
 Reply in {answer_language}.
 """),
             ("human", "Question:\n{question}\n\nArchitecture map:\n{map_text}\n\nEvidence:\n{evidence_text}\n")
@@ -995,7 +996,10 @@ Reply in {answer_language}.
                     # Читаем весь файл
                     if os.path.isfile(target):
                         content = _read_text(target)
-                        out.append((f"{rel}:*", content))
+                        # Добавляем номера строк
+                        lines = content.splitlines()
+                        numbered_content = "\n".join([f"{i+1:3d}| {line}" for i, line in enumerate(lines)])
+                        out.append((f"{rel}:*", numbered_content))
                     elif os.path.isdir(target):
                         # Для директорий показываем структуру
                         structure = self._get_directory_structure(target, root)
@@ -1004,13 +1008,20 @@ Reply in {answer_language}.
                     # Ищем конкретный элемент
                     content = _read_text(target) if os.path.isfile(target) else ""
                     if content:
-                        # Простой поиск по содержимому
+                        # Поиск по содержимому с номерами строк
                         lines = content.splitlines()
                         for i, line in enumerate(lines, 1):
                             if sym.lower() in line.lower():
                                 start = max(1, i - 2)
                                 end = min(len(lines), i + 3)
-                                snippet = "\n".join(lines[start-1:end])
+                                
+                                # Создаем snippet с номерами строк
+                                snippet_lines = []
+                                for j in range(start-1, end):
+                                    if j < len(lines):
+                                        snippet_lines.append(f"{j+1:3d}| {lines[j]}")
+                                
+                                snippet = "\n".join(snippet_lines)
                                 out.append((f"{rel}:{i}", snippet))
                                 break
             except Exception as e:
@@ -1055,6 +1066,8 @@ Reply in {answer_language}.
     
     def _get_directory_structure(self, dir_path: str, root: str) -> str:
         """Получает структуру директории"""
+
+        rel_path = 'none'
         try:
             structure = []
             rel_path = _relpath(dir_path, root)
