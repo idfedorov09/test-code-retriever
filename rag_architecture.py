@@ -705,7 +705,8 @@ For dependency questions:
 - Look at import statements and module relationships
 
 Provide specific file references and explain architectural decisions clearly.
-Be precise, cite concrete references as `file:line`, and provide actionable insights.
+Be precise, cite concrete references as `file:line` (use the exact line numbers shown in the evidence), and provide actionable insights.
+When referencing line numbers, use the exact numbers shown in the evidence snippets.
 Reply in {answer_language}.
 """),
             ("human", "Question:\n{question}\n\nArchitecture map:\n{map_text}\n\nEvidence:\n{evidence_text}\n")
@@ -747,6 +748,48 @@ Reply in {answer_language}.
                     "is_documentation": fm.is_documentation
                 }
                 docs.append(Document(page_content=content, metadata=meta))
+            
+            # Добавляем исходное содержимое файла с номерами строк для точного поиска
+            if fm.is_config or fm.is_docker or fm.is_documentation:
+                try:
+                    # Читаем исходный файл
+                    from rag_base import _read_text
+                    original_content = _read_text(fm.path)
+                    
+                    # Создаем документ с исходным содержимым и номерами строк
+                    lines = original_content.splitlines()
+                    numbered_content = "\n".join([f"{i+1:3d}| {line}" for i, line in enumerate(lines)])
+                    
+                    # Если файл большой, разбиваем на чанки
+                    if len(numbered_content) > max_chunk_size:
+                        chunks = self._split_into_chunks(numbered_content, max_chunk_size)
+                        for i, chunk in enumerate(chunks):
+                            meta = {
+                                "source": fm.path,
+                                "type": "source-content",
+                                "file_type": fm.file_type,
+                                "is_config": fm.is_config,
+                                "is_docker": fm.is_docker,
+                                "is_documentation": fm.is_documentation,
+                                "chunk_id": i,
+                                "total_chunks": len(chunks)
+                            }
+                            docs.append(Document(page_content=chunk, metadata=meta))
+                    else:
+                        meta = {
+                            "source": fm.path,
+                            "type": "source-content",
+                            "file_type": fm.file_type,
+                            "is_config": fm.is_config,
+                            "is_docker": fm.is_docker,
+                            "is_documentation": fm.is_documentation
+                        }
+                        docs.append(Document(page_content=numbered_content, metadata=meta))
+                        
+                except Exception as e:
+                    # Если не удалось прочитать файл, пропускаем
+                    print(f"Warning: Could not read source content for {fm.path}: {e}")
+                    continue
         
         # Добавляем сводку по архитектурным паттернам
         patterns = self._extract_architectural_patterns(arch_maps)
@@ -995,7 +1038,10 @@ Reply in {answer_language}.
                     # Читаем весь файл
                     if os.path.isfile(target):
                         content = _read_text(target)
-                        out.append((f"{rel}:*", content))
+                        # Добавляем номера строк
+                        lines = content.splitlines()
+                        numbered_content = "\n".join([f"{i+1:3d}| {line}" for i, line in enumerate(lines)])
+                        out.append((f"{rel}:*", numbered_content))
                     elif os.path.isdir(target):
                         # Для директорий показываем структуру
                         structure = self._get_directory_structure(target, root)
@@ -1004,15 +1050,51 @@ Reply in {answer_language}.
                     # Ищем конкретный элемент
                     content = _read_text(target) if os.path.isfile(target) else ""
                     if content:
-                        # Простой поиск по содержимому
+                        # Улучшенный поиск по содержимому с правильными номерами строк
                         lines = content.splitlines()
-                        for i, line in enumerate(lines, 1):
-                            if sym.lower() in line.lower():
-                                start = max(1, i - 2)
-                                end = min(len(lines), i + 3)
-                                snippet = "\n".join(lines[start-1:end])
-                                out.append((f"{rel}:{i}", snippet))
-                                break
+                        
+                        # Если символ содержит точку (например, "services.db.image"), ищем более точно
+                        if '.' in sym:
+                            # Ищем по частям
+                            parts = sym.split('.')
+                            found_lines = []
+                            
+                            for i, line in enumerate(lines, 1):
+                                line_lower = line.lower().strip()
+                                # Ищем строки, которые содержат все части
+                                if all(part.lower() in line_lower for part in parts):
+                                    found_lines.append((i, line))
+                            
+                            if found_lines:
+                                # Показываем все найденные строки
+                                for line_num, line in found_lines:
+                                    start = max(1, line_num - 2)
+                                    end = min(len(lines), line_num + 3)
+                                    
+                                    snippet_lines = []
+                                    for j in range(start-1, end):
+                                        if j < len(lines):
+                                            snippet_lines.append(f"{j+1:3d}| {lines[j]}")
+                                    
+                                    snippet = "\n".join(snippet_lines)
+                                    out.append((f"{rel}:{line_num}", snippet))
+                        else:
+                            # Обычный поиск
+                            for i, line in enumerate(lines, 1):
+                                if sym.lower() in line.lower():
+                                    # Показываем контекст с правильными номерами строк
+                                    start = max(1, i - 2)
+                                    end = min(len(lines), i + 3)
+                                    
+                                    # Создаем snippet с номерами строк
+                                    snippet_lines = []
+                                    for j in range(start-1, end):
+                                        if j < len(lines):
+                                            snippet_lines.append(f"{j+1:3d}| {lines[j]}")
+                                    
+                                    snippet = "\n".join(snippet_lines)
+                                    out.append((f"{rel}:{i}", snippet))
+                                    break
             except Exception as e:
                 print(f"Error extracting {target}: {e}")
                 continue
@@ -1055,6 +1137,7 @@ Reply in {answer_language}.
     
     def _get_directory_structure(self, dir_path: str, root: str) -> str:
         """Получает структуру директории"""
+        rel_path = 'none'
         try:
             structure = []
             rel_path = _relpath(dir_path, root)
@@ -1082,7 +1165,27 @@ Reply in {answer_language}.
             if d.metadata.get("type") in ("pattern-summary", "dependency-summary", "structure-summary"):
                 pieces.append(f"---\n{d.page_content}\n")
         
-        # Затем добавляем карты файлов
+        # Затем добавляем исходное содержимое файлов (для точного поиска)
+        for d in docs:
+            if d.metadata.get("type") == "source-content":
+                source = d.metadata.get("source", "unknown")
+                file_type = d.metadata.get("file_type", "unknown")
+                is_config = d.metadata.get("is_config", False)
+                is_docker = d.metadata.get("is_docker", False)
+                
+                header = f"SOURCE FILE: {source} (type: {file_type}"
+                if is_config:
+                    header += ", config"
+                if is_docker:
+                    header += ", docker"
+                header += ")\n"
+                
+                pieces.append(f"---\n{header}{d.page_content}\n")
+            
+            if sum(len(p) for p in pieces) > max_chars:
+                break
+        
+        # Наконец добавляем карты файлов (если есть место)
         for d in docs:
             if d.metadata.get("type") == "arch-map":
                 # Добавляем информацию о файле в начало
@@ -1091,7 +1194,7 @@ Reply in {answer_language}.
                 is_config = d.metadata.get("is_config", False)
                 is_docker = d.metadata.get("is_docker", False)
                 
-                header = f"FILE: {source} (type: {file_type}"
+                header = f"ARCHITECTURE MAP: {source} (type: {file_type}"
                 if is_config:
                     header += ", config"
                 if is_docker:
