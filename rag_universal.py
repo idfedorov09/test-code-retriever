@@ -685,7 +685,8 @@ For questions about:
 - Performance: Analyze code patterns and configuration optimizations
 
 Provide specific file:line references from the evidence and explain relationships clearly.
-Be precise, cite concrete references as `file:line`, and provide actionable insights. 
+Be precise, cite concrete references as `file:line` (use the exact line numbers shown in the evidence), and provide actionable insights.
+When referencing line numbers, use the exact numbers shown in the evidence snippets.
 Consider the multi-technology nature of the project in your analysis.
 Reply in {answer_language}.
 """),
@@ -1125,7 +1126,10 @@ This is a large file with {fm.loc} lines. Use specific queries to get detailed i
                 if file_size > 10000:  # Больше 10KB
                     content = self._handle_large_file(src, rel_for_output, file_size, line_count)
                 else:
-                    content = src
+                    # Добавляем номера строк для всех файлов
+                    lines = src.splitlines()
+                    numbered_content = "\n".join([f"{i+1:3d}| {line}" for i, line in enumerate(lines)])
+                    content = numbered_content
                 out.append((f"{rel_for_output}:1", content))
             else:
                 # Проверяем, не запрашивается ли диапазон строк
@@ -1421,6 +1425,19 @@ This is a large file with {fm.loc} lines. Use specific queries to get detailed i
             r'строк[иа]?\s+(\d+):(\d+)',  # строки 11799:11833
             r'line[s]?\s+(\d+)-(\d+)',  # lines 11799-11833
             r'line[s]?\s+(\d+):(\d+)',  # lines 11799:11833
+            r'(\d+)\s*и\s*(\d+)',  # 27 и 28
+            r'(\d+)\s*до\s*(\d+)',  # 27 до 30
+            r'(\d+)\s*по\s*(\d+)',  # 27 по 30
+            r'с\s*(\d+)\s*по\s*(\d+)',  # с 27 по 30
+            r'от\s*(\d+)\s*до\s*(\d+)',  # от 27 до 30
+        ]
+        
+        # Ищем паттерны для одной строки
+        single_line_patterns = [
+            r'(\d+)\s*строчк[аи]',  # 27 строчка
+            r'(\d+)\s*строка',  # 27 строка
+            r'(\d+)\s*line',  # 27 line
+            r'(\d+)\s*строк[аи]',  # 27 строки
         ]
         
         for pattern in patterns:
@@ -1429,6 +1446,23 @@ This is a large file with {fm.loc} lines. Use specific queries to get detailed i
                 start_line = int(match.group(1))
                 end_line = int(match.group(2))
                 return (start_line, end_line)
+        
+        # Проверяем паттерны для одной строки
+        for pattern in single_line_patterns:
+            match = re.search(pattern, symbol, re.IGNORECASE)
+            if match:
+                line_num = int(match.group(1))
+                return (line_num, line_num)
+        
+        # Проверяем паттерны для нескольких отдельных строк (например, "27, 28, 30")
+        comma_pattern = r'(\d+(?:\s*,\s*\d+)*)'
+        match = re.search(comma_pattern, symbol)
+        if match and ',' in match.group(1):
+            # Извлекаем все номера строк
+            line_numbers = [int(x.strip()) for x in match.group(1).split(',')]
+            if len(line_numbers) >= 2:
+                # Возвращаем диапазон от минимального до максимального
+                return (min(line_numbers), max(line_numbers))
         
         return None
     

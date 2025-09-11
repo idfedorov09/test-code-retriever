@@ -673,6 +673,7 @@ IMPORTANT:
 - For dependency questions, examine package.json, requirements.txt, docker-compose files
 - For pattern questions, look at directory structure and file organization
 - Use "*" as symbol to examine entire files when needed
+- For specific line requests (e.g., "27 строчка", "строки 27-30"), use the exact line numbers as symbol
 - If you see a file mentioned in the context, use its exact name from the context
 
 Respond ONLY with JSON array, no prose.
@@ -703,6 +704,12 @@ For dependency questions:
 - Check package.json, requirements.txt, go.mod, etc.
 - Examine docker-compose for service dependencies
 - Look at import statements and module relationships
+
+For specific line requests:
+- If asked for a specific line (e.g., "27 строчка"), show exactly that line with its number
+- If asked for a range of lines (e.g., "строки 27-30"), show all lines in that range
+- If the requested line doesn't exist, clearly state that and show the total number of lines in the file
+- Always use the exact line numbers shown in the evidence
 
 Provide specific file references and explain architectural decisions clearly.
 Be precise, cite concrete references as `file:line` (use the exact line numbers shown in the evidence), and provide actionable insights.
@@ -1005,30 +1012,100 @@ Reply in {answer_language}.
                         structure = self._get_directory_structure(target, root)
                         out.append((f"{rel}:*", structure))
                 else:
-                    # Ищем конкретный элемент
+                    # Ищем конкретный элемент или диапазон строк
                     content = _read_text(target) if os.path.isfile(target) else ""
                     if content:
-                        # Поиск по содержимому с номерами строк
-                        lines = content.splitlines()
-                        for i, line in enumerate(lines, 1):
-                            if sym.lower() in line.lower():
-                                start = max(1, i - 2)
-                                end = min(len(lines), i + 3)
+                        # Проверяем, не запрашивается ли диапазон строк
+                        line_range = self._extract_line_range_from_symbol(sym)
+                        if line_range:
+                            start_line, end_line = line_range
+                            lines = content.splitlines()
+                            if start_line <= len(lines) and end_line <= len(lines):
+                                # Извлекаем запрашиваемые строки
+                                requested_lines = lines[start_line-1:end_line]
                                 
-                                # Создаем snippet с номерами строк
-                                snippet_lines = []
-                                for j in range(start-1, end):
-                                    if j < len(lines):
-                                        snippet_lines.append(f"{j+1:3d}| {lines[j]}")
+                                # Создаем результат с номерами строк
+                                result_lines = []
+                                for i, line in enumerate(requested_lines, start_line):
+                                    result_lines.append(f"{i:3d}| {line}")
                                 
-                                snippet = "\n".join(snippet_lines)
-                                out.append((f"{rel}:{i}", snippet))
-                                break
+                                result = "\n".join(result_lines)
+                                out.append((f"{rel}:{start_line}-{end_line}", result))
+                        else:
+                            # Поиск по содержимому с номерами строк
+                            lines = content.splitlines()
+                            for i, line in enumerate(lines, 1):
+                                if sym.lower() in line.lower():
+                                    start = max(1, i - 2)
+                                    end = min(len(lines), i + 3)
+                                    
+                                    # Создаем snippet с номерами строк
+                                    snippet_lines = []
+                                    for j in range(start-1, end):
+                                        if j < len(lines):
+                                            snippet_lines.append(f"{j+1:3d}| {lines[j]}")
+                                    
+                                    snippet = "\n".join(snippet_lines)
+                                    out.append((f"{rel}:{i}", snippet))
+                                    break
             except Exception as e:
                 print(f"Error extracting {target}: {e}")
                 continue
         
         return out
+    
+    def _extract_line_range_from_symbol(self, symbol: str) -> Optional[Tuple[int, int]]:
+        """Извлекает диапазон строк из символа"""
+        import re
+        
+        # Ищем паттерны типа "27-30" или "27:30"
+        patterns = [
+            r'(\d+)-(\d+)',  # 27-30
+            r'(\d+):(\d+)',  # 27:30
+            r'строк[иа]?\s+(\d+)-(\d+)',  # строки 27-30
+            r'строк[иа]?\s+(\d+):(\d+)',  # строки 27:30
+            r'line[s]?\s+(\d+)-(\d+)',  # lines 27-30
+            r'line[s]?\s+(\d+):(\d+)',  # lines 27:30
+            r'(\d+)\s*и\s*(\d+)',  # 27 и 28
+            r'(\d+)\s*до\s*(\d+)',  # 27 до 30
+            r'(\d+)\s*по\s*(\d+)',  # 27 по 30
+            r'с\s*(\d+)\s*по\s*(\d+)',  # с 27 по 30
+            r'от\s*(\d+)\s*до\s*(\d+)',  # от 27 до 30
+        ]
+        
+        # Ищем паттерны для одной строки
+        single_line_patterns = [
+            r'(\d+)\s*строчк[аи]',  # 27 строчка
+            r'(\d+)\s*строка',  # 27 строка
+            r'(\d+)\s*line',  # 27 line
+            r'(\d+)\s*строк[аи]',  # 27 строки
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, symbol, re.IGNORECASE)
+            if match:
+                start_line = int(match.group(1))
+                end_line = int(match.group(2))
+                return (start_line, end_line)
+        
+        # Проверяем паттерны для одной строки
+        for pattern in single_line_patterns:
+            match = re.search(pattern, symbol, re.IGNORECASE)
+            if match:
+                line_num = int(match.group(1))
+                return (line_num, line_num)
+        
+        # Проверяем паттерны для нескольких отдельных строк (например, "27, 28, 30")
+        comma_pattern = r'(\d+(?:\s*,\s*\d+)*)'
+        match = re.search(comma_pattern, symbol)
+        if match and ',' in match.group(1):
+            # Извлекаем все номера строк
+            line_numbers = [int(x.strip()) for x in match.group(1).split(',')]
+            if len(line_numbers) >= 2:
+                # Возвращаем диапазон от минимального до максимального
+                return (min(line_numbers), max(line_numbers))
+        
+        return None
     
     def _find_file_by_name(self, root: str, filename: str) -> Optional[str]:
         """Ищет файл по имени в проекте"""
